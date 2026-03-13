@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Galactic Trading Post</title>
+    <meta name="theme-color" content="#0b1430" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Galactic Trading Post" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="icons/icon.svg" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-grid" aria-hidden="true"></div>
+    <main class="app">
+      <header class="panel header-panel">
+        <div>
+          <p class="eyebrow">Idle Management Game</p>
+          <h1>Galactic Trading Post</h1>
+        </div>
+        <div class="header-stats" id="headerStats"></div>
+      </header>
+
+      <section class="panel" aria-labelledby="newsTitle">
+        <div class="section-head">
+          <h2 id="newsTitle">Newsfeed</h2>
+          <p class="section-subtitle">Live market events across discovered systems.</p>
+        </div>
+        <div id="newsfeedContent" class="stack"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="marketTitle">
+        <div class="section-head">
+          <h2 id="marketTitle">Home System Market</h2>
+          <p class="section-subtitle" id="homeSystemName"></p>
+        </div>
+        <div id="homeMarket" class="market-table-wrap"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="systemsTitle">
+        <div class="section-head">
+          <h2 id="systemsTitle">Discovered Systems</h2>
+          <p class="section-subtitle">Launch round-trip trade missions from home.</p>
+        </div>
+        <div id="systemsList" class="cards-grid"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="fleetTitle">
+        <div class="section-head">
+          <h2 id="fleetTitle">Fleet / Missions</h2>
+          <p class="section-subtitle">Mission timers tick in real time.</p>
+        </div>
+        <div id="fleetContent" class="fleet-grid"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="shipyardTitle">
+        <div class="section-head">
+          <h2 id="shipyardTitle">Shipyard / Upgrades</h2>
+          <p class="section-subtitle">Expand your operation.</p>
+        </div>
+        <div id="shipyardContent" class="shipyard-actions"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="hangarTitle">
+        <div class="section-head">
+          <h2 id="hangarTitle">Hangar</h2>
+          <p class="section-subtitle">Customize and upgrade individual merchant ships.</p>
+        </div>
+        <div id="hangarContent" class="shipyard-actions"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="logTitle">
+        <div class="section-head">
+          <h2 id="logTitle">Event Log</h2>
+          <button id="resetBtn" class="btn danger" type="button">Reset Game</button>
+        </div>
+        <ul id="eventLog" class="event-log"></ul>
+      </section>
+    </main>
+
+    <div id="awayModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="awayTitle">
+      <div class="modal-card">
+        <h2 id="awayTitle">Away Summary</h2>
+        <p class="section-subtitle">Your trading post kept running while you were away.</p>
+        <ul id="awaySummaryList" class="summary-list"></ul>
+        <button id="closeAwayModalBtn" class="btn" type="button">Continue</button>
+      </div>
+    </div>
+
+    <div id="tradeModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="tradeTitle">
+      <div class="modal-card trade-modal-card">
+        <div class="section-head">
+          <h2 id="tradeTitle">Trade Mission</h2>
+          <button id="closeTradeModalBtn" class="btn secondary" type="button">Close</button>
+        </div>
+        <div id="tradePlannerContent"></div>
+      </div>
+    </div>
+
+    <script src="script.js"></script>
+  </body>
+</html>

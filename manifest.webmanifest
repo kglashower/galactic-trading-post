@@ -1,0 +1,25 @@
+{
+  "name": "Galactic Trading Post",
+  "short_name": "Trading Post",
+  "description": "Run a star-system trading hub, dispatch merchant ships, and manage a growing interstellar fleet offline.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#050816",
+  "theme_color": "#0b1430",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "./icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "./icons/icon-maskable.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}
