@@ -1,4 +1,4 @@
-const CACHE_NAME = "galactic-trading-post-v1";
+const CACHE_NAME = "galactic-trading-post-v2";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -8,6 +8,37 @@ const APP_SHELL = [
   "./icons/icon.svg",
   "./icons/icon-maskable.svg"
 ];
+
+function shouldCache(response) {
+  return response && response.ok && (response.type === "basic" || response.type === "default");
+}
+
+async function networkFirst(request, fallbackPath) {
+  const cache = await caches.open(CACHE_NAME);
+  try {
+    const networkResponse = await fetch(request);
+    if (shouldCache(networkResponse)) {
+      cache.put(request, networkResponse.clone());
+    }
+    return networkResponse;
+  } catch (error) {
+    return (await caches.match(request)) || (fallbackPath ? caches.match(fallbackPath) : Promise.reject(error));
+  }
+}
+
+async function cacheFirst(request) {
+  const cachedResponse = await caches.match(request);
+  if (cachedResponse) {
+    return cachedResponse;
+  }
+
+  const networkResponse = await fetch(request);
+  if (shouldCache(networkResponse)) {
+    const cache = await caches.open(CACHE_NAME);
+    cache.put(request, networkResponse.clone());
+  }
+  return networkResponse;
+}
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -40,23 +71,15 @@ self.addEventListener("fetch", (event) => {
   }
 
   if (event.request.mode === "navigate") {
-    event.respondWith(
-      fetch(event.request).catch(() => caches.match("./index.html"))
-    );
+    event.respondWith(networkFirst(event.request, "./index.html"));
     return;
   }
 
-  event.respondWith(
-    caches.match(event.request).then((cachedResponse) => {
-      if (cachedResponse) {
-        return cachedResponse;
-      }
+  const destination = event.request.destination;
+  if (destination === "script" || destination === "style" || destination === "document" || destination === "manifest") {
+    event.respondWith(networkFirst(event.request));
+    return;
+  }
 
-      return fetch(event.request).then((networkResponse) => {
-        const responseClone = networkResponse.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, responseClone));
-        return networkResponse;
-      });
-    })
-  );
+  event.respondWith(cacheFirst(event.request));
 });
