@@ -934,6 +934,7 @@ function normalizeLoadedState(state) {
 
         return {
           id: m.id || `tm-${Date.now()}-${i}`,
+          batchId: m.batchId || `legacy-${m.id || i}`,
           shipId: m.shipId,
           destinationSystemId,
           outboundCommodityId,
@@ -1205,6 +1206,7 @@ function launchTradeMission(state, destinationSystemId, outboundCommodityId, ret
 
   const borrowedAmount = useFinancing ? Math.max(0, totalLaunchCost - state.credits) : 0;
   const cashContribution = totalLaunchCost - borrowedAmount;
+  const missionBatchId = options.batchId || `batch-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
   state.credits -= cashContribution;
   state.escrowCredits += totalEscrow;
@@ -1229,6 +1231,7 @@ function launchTradeMission(state, destinationSystemId, outboundCommodityId, ret
 
     const mission = {
       id: `tm-${Date.now()}-${Math.floor(Math.random() * 1000)}-${idSuffix}`,
+      batchId: missionBatchId,
       shipId: ship.id,
       destinationSystemId,
       outboundCommodityId,
@@ -2031,44 +2034,72 @@ function renderFleet() {
       : 0;
     return sum + missionEscrow;
   }, 0);
+  const missionGroups = Array.from(
+    gameState.tradeMissions.reduce((map, mission) => {
+      const groupKey = `${mission.batchId || mission.id}:${mission.durationSeconds}`;
+      if (!map.has(groupKey)) {
+        map.set(groupKey, []);
+      }
+      map.get(groupKey).push(mission);
+      return map;
+    }, new Map()).values()
+  );
 
   const tradeMissionMarkup =
-    gameState.tradeMissions.length === 0
+    missionGroups.length === 0
       ? '<div class="empty">No active trade missions.</div>'
-      : gameState.tradeMissions
-          .map((mission) => {
-            const destination = findSystem(gameState, mission.destinationSystemId);
-            const ship = findMerchantShip(gameState, mission.shipId);
-            const potential = Number.isFinite(mission.estimatedProfit)
-              ? mission.estimatedProfit
-              : (mission.outboundSellPrice - mission.outboundBuyPrice + (mission.returnSellPrice - mission.returnBuyPrice)) *
-                mission.units;
-            const missionEscrow = !mission.arrivalResolved && Number.isFinite(mission.escrowReserved)
-              ? mission.escrowReserved
-              : 0;
-            const financeRepayment = Number.isFinite(mission.financeRepayment) ? mission.financeRepayment : 0;
-            const halfDuration = Math.max(1, Math.floor(mission.durationSeconds / 2));
-            const outboundRemaining = mission.arrivalResolved
-              ? 0
-              : Math.max(0, mission.remainingSeconds - halfDuration);
-            const returnRemaining = mission.arrivalResolved
-              ? Math.max(0, mission.remainingSeconds)
-              : Math.max(0, Math.min(halfDuration, mission.remainingSeconds));
-            const phase = mission.arrivalResolved ? "Return Leg" : "Outbound Leg";
-            const phaseEta = mission.arrivalResolved ? returnRemaining : outboundRemaining;
-            const elapsed = Math.max(0, mission.durationSeconds - mission.remainingSeconds);
-            const progress = Math.min(100, Math.max(0, (elapsed / mission.durationSeconds) * 100));
+      : missionGroups
+          .map((missions) => {
+            const leadMission = missions[0];
+            const destination = findSystem(gameState, leadMission.destinationSystemId);
+            const potential = missions.reduce((sum, mission) => {
+              const missionPotential = Number.isFinite(mission.estimatedProfit)
+                ? mission.estimatedProfit
+                : (mission.outboundSellPrice - mission.outboundBuyPrice + (mission.returnSellPrice - mission.returnBuyPrice)) *
+                  mission.units;
+              return sum + missionPotential;
+            }, 0);
+            const missionEscrow = missions.reduce((sum, mission) => {
+              const reserved = !mission.arrivalResolved && Number.isFinite(mission.escrowReserved)
+                ? mission.escrowReserved
+                : 0;
+              return sum + reserved;
+            }, 0);
+            const borrowedAmount = missions.reduce((sum, mission) => sum + (mission.borrowedAmount || 0), 0);
+            const financeRepayment = missions.reduce((sum, mission) => sum + (mission.financeRepayment || 0), 0);
+            const slowestRemaining = Math.max(...missions.map((mission) => mission.remainingSeconds));
+            const fastestRemaining = Math.min(...missions.map((mission) => mission.remainingSeconds));
+            const progress = missions.reduce((sum, mission) => {
+              const elapsed = Math.max(0, mission.durationSeconds - mission.remainingSeconds);
+              return sum + Math.min(100, Math.max(0, (elapsed / mission.durationSeconds) * 100));
+            }, 0) / missions.length;
+            const shipMarkup = missions
+              .map((mission) => {
+                const ship = findMerchantShip(gameState, mission.shipId);
+                const halfDuration = Math.max(1, Math.floor(mission.durationSeconds / 2));
+                const outboundRemaining = mission.arrivalResolved
+                  ? 0
+                  : Math.max(0, mission.remainingSeconds - halfDuration);
+                const returnRemaining = mission.arrivalResolved
+                  ? Math.max(0, mission.remainingSeconds)
+                  : Math.max(0, Math.min(halfDuration, mission.remainingSeconds));
+                const phase = mission.arrivalResolved ? "Return" : "Outbound";
+                return `<div class="section-subtitle"><strong style="color:${ship?.nameColor || "#ffffff"}">${escapeHtml(
+                  ship ? getShipDisplayName(ship) : mission.shipId.toUpperCase()
+                )}</strong> (${mission.shipId.toUpperCase()}) • ${phase} • ETA ${formatSeconds(mission.remainingSeconds)} • ${mission.returnUnits || mission.units}/${mission.units} units</div>`;
+              })
+              .join("");
+
             return `
           <article class="mission-item">
-            <strong style="color:${ship?.nameColor || "#ffffff"}">${escapeHtml(ship ? getShipDisplayName(ship) : mission.shipId.toUpperCase())}</strong> <span class="section-subtitle">(${mission.shipId.toUpperCase()})</span> <-> ${destination ? destination.name : "Unknown"}<br />
-            Outbound: ${renderCommodityLabel(mission.outboundCommodityId, destination)} (${mission.units} units)<br />
-            Return: ${renderCommodityLabel(mission.returnCommodityId, destination)} (${mission.returnUnits || mission.units} units)<br />
-            Escrow ${mission.arrivalResolved ? "Released" : "Reserved"}: <strong>${formatCredits(missionEscrow)}</strong><br />
-            ${financeRepayment > 0 ? `Financing: borrowed <strong>${formatCredits(mission.borrowedAmount)}</strong>, repay <strong>${formatCredits(financeRepayment)}</strong><br />` : ""}
-            Phase: <strong>${phase}</strong> (ETA ${formatSeconds(phaseEta)})<br />
-            Outbound ETA: ${formatSeconds(outboundRemaining)} | Return ETA: ${formatSeconds(returnRemaining)}<br />
-            Total ETA: <strong>${formatSeconds(mission.remainingSeconds)}</strong><br />
+            <strong>${missions.length} ship${missions.length > 1 ? "s" : ""}</strong> <span class="section-subtitle"><-> ${destination ? destination.name : "Unknown"}</span><br />
+            Outbound: ${renderCommodityLabel(leadMission.outboundCommodityId, destination)} (${missions.reduce((sum, mission) => sum + mission.units, 0)} units)<br />
+            Return: ${renderCommodityLabel(leadMission.returnCommodityId, destination)} (${missions.reduce((sum, mission) => sum + (mission.returnUnits || mission.units), 0)} units)<br />
+            Escrow Reserved: <strong>${formatCredits(missionEscrow)}</strong><br />
+            ${financeRepayment > 0 ? `Financing: borrowed <strong>${formatCredits(borrowedAmount)}</strong>, repay <strong>${formatCredits(financeRepayment)}</strong><br />` : ""}
+            Fleet ETA: <strong>${formatSeconds(fastestRemaining)} - ${formatSeconds(slowestRemaining)}</strong><br />
             <div class="progress-track"><div class="progress-fill" style="width:${progress.toFixed(1)}%"></div></div>
+            ${shipMarkup}
             Estimated: <span class="${potential >= 0 ? "pos" : "neg"}">${potential >= 0 ? "+" : ""}${formatCredits(
               potential
             )}</span>
