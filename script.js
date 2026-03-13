@@ -365,6 +365,75 @@ function getShipTradeDuration(distance, ship) {
   return Math.max(6, Math.round(getTradeMissionDuration(distance) * getShipSpeedMultiplier(ship)));
 }
 
+function getTradeEscrowPerUnit(outboundSellPriceEstimate, returnBuyPriceEstimate) {
+  return Math.max(0, returnBuyPriceEstimate - outboundSellPriceEstimate);
+}
+
+function buildTradeLoadPlan(state, selectedShips, distance, outboundBuyPrice, outboundSellPriceEstimate, returnBuyPriceEstimate, returnSellPriceEstimate, availableCredits, allowPartialLoad) {
+  const escrowPerUnit = getTradeEscrowPerUnit(outboundSellPriceEstimate, returnBuyPriceEstimate);
+  const upfrontCostPerUnit = outboundBuyPrice + escrowPerUnit;
+  const shipCapacities = selectedShips.map((ship) => ({
+    ship,
+    capacityUnits: getShipCargoUnits(state, ship)
+  }));
+  const totalCapacityUnits = shipCapacities.reduce((sum, item) => sum + item.capacityUnits, 0);
+  const affordableUnits = Math.min(
+    totalCapacityUnits,
+    Math.floor(availableCredits / upfrontCostPerUnit)
+  );
+  const targetUnits = allowPartialLoad ? affordableUnits : totalCapacityUnits;
+
+  if (targetUnits <= 0) {
+    return {
+      plans: [],
+      totalCapacityUnits,
+      loadedUnits: 0,
+      upfrontCostPerUnit,
+      affordableUnits: 0
+    };
+  }
+
+  let remainingUnits = targetUnits;
+  const plans = shipCapacities
+    .map(({ ship, capacityUnits }) => {
+      const units = Math.min(capacityUnits, remainingUnits);
+      remainingUnits -= units;
+      if (units <= 0) {
+        return null;
+      }
+
+      const outboundCost = outboundBuyPrice * units;
+      const estimatedOutboundRevenue = outboundSellPriceEstimate * units;
+      const estimatedReturnCost = returnBuyPriceEstimate * units;
+      const escrowReserved = escrowPerUnit * units;
+      const upfrontCost = outboundCost + escrowReserved;
+      const estimatedProfit =
+        (outboundSellPriceEstimate - outboundBuyPrice + (returnSellPriceEstimate - returnBuyPriceEstimate)) * units;
+
+      return {
+        ship,
+        capacityUnits,
+        units,
+        outboundCost,
+        estimatedOutboundRevenue,
+        estimatedReturnCost,
+        escrowReserved,
+        upfrontCost,
+        estimatedProfit,
+        durationSeconds: getShipTradeDuration(distance, ship)
+      };
+    })
+    .filter(Boolean);
+
+  return {
+    plans,
+    totalCapacityUnits,
+    loadedUnits: plans.reduce((sum, plan) => sum + plan.units, 0),
+    upfrontCostPerUnit,
+    affordableUnits
+  };
+}
+
 function getCargoUpgradeCost(ship) {
   return clampPositiveInt(
     BALANCE.CARGO_UPGRADE_BASE_COST * Math.pow(BALANCE.CARGO_UPGRADE_COST_GROWTH, ship.cargoLevel)
@@ -827,7 +896,17 @@ function normalizeLoadedState(state) {
           ? m.estimatedProfit
           : (outboundSellPrice - outboundBuyPrice + (returnSellPrice - returnBuyPrice)) * units;
         const outboundCost = Number.isFinite(m.outboundCost) ? m.outboundCost : outboundBuyPrice * units;
-        const returnEscrow = Number.isFinite(m.returnEscrow) ? m.returnEscrow : returnBuyPrice * units;
+        const estimatedOutboundRevenue = Number.isFinite(m.estimatedOutboundRevenue)
+          ? m.estimatedOutboundRevenue
+          : outboundSellPrice * units;
+        const estimatedReturnCost = Number.isFinite(m.estimatedReturnCost)
+          ? m.estimatedReturnCost
+          : returnBuyPrice * units;
+        const escrowReserved = Number.isFinite(m.escrowReserved)
+          ? m.escrowReserved
+          : Number.isFinite(m.returnEscrow)
+            ? m.returnEscrow
+            : Math.max(0, estimatedReturnCost - estimatedOutboundRevenue);
 
         return {
           id: m.id || `tm-${Date.now()}-${i}`,
@@ -840,9 +919,15 @@ function normalizeLoadedState(state) {
           outboundSellPrice,
           returnBuyPrice,
           returnSellPrice,
+          estimatedOutboundRevenue,
+          estimatedReturnCost,
           estimatedProfit,
           outboundCost,
-          returnEscrow,
+          escrowReserved,
+          arrivalResolved: Boolean(m.arrivalResolved),
+          actualOutboundRevenue: Number.isFinite(m.actualOutboundRevenue) ? m.actualOutboundRevenue : 0,
+          actualReturnCost: Number.isFinite(m.actualReturnCost) ? m.actualReturnCost : 0,
+          returnUnits: Number.isFinite(m.returnUnits) ? Math.max(0, m.returnUnits) : 0,
           remainingSeconds: Number.isFinite(m.remainingSeconds) ? Math.max(0, m.remainingSeconds) : durationSeconds,
           durationSeconds,
           createdAt: m.createdAt || nowIso()
@@ -856,7 +941,7 @@ function normalizeLoadedState(state) {
     ? Math.max(0, Math.floor(state.scoutMissionsLaunched))
     : inferredScoutMissions;
   const inferredEscrowFromMissions = normalizedTradeMissions.reduce(
-    (sum, mission) => sum + (Number.isFinite(mission.returnEscrow) ? mission.returnEscrow : 0),
+    (sum, mission) => sum + (!mission.arrivalResolved && Number.isFinite(mission.escrowReserved) ? mission.escrowReserved : 0),
     0
   );
   const hasStoredEscrow = Number.isFinite(state.escrowCredits);
@@ -1025,7 +1110,7 @@ function canLaunchTrade(state) {
   return getIdleMerchantShips(state).length > 0;
 }
 
-function launchTradeMission(state, destinationSystemId, outboundCommodityId, returnCommodityId, shipIds) {
+function launchTradeMission(state, destinationSystemId, outboundCommodityId, returnCommodityId, shipIds, allowPartialLoad = false) {
   const destination = findSystem(state, destinationSystemId);
   const home = getHomeSystem(state);
   const idleShips = getIdleMerchantShips(state);
@@ -1060,34 +1145,31 @@ function launchTradeMission(state, destinationSystemId, outboundCommodityId, ret
   const outboundSellPrice = destination.prices[outboundCommodityId];
   const returnBuyPrice = destination.prices[returnCommodityId];
   const returnSellPrice = home.prices[returnCommodityId];
-  let totalLaunchCost = 0;
-  let totalEscrow = 0;
-  const launchPlans = selectedShips.map((ship, idx) => {
-    const units = getShipCargoUnits(state, ship);
-    const outboundCost = outboundBuyPrice * units;
-    const returnEscrow = returnBuyPrice * units;
-    const missionCost = outboundCost + returnEscrow;
-    const durationSeconds = getShipTradeDuration(destination.distance, ship);
-    const estimatedProfit =
-      (outboundSellPrice - outboundBuyPrice + (returnSellPrice - returnBuyPrice)) * units;
-    totalLaunchCost += missionCost;
-    totalEscrow += returnEscrow;
+  const loadPlan = buildTradeLoadPlan(
+    state,
+    selectedShips,
+    destination.distance,
+    outboundBuyPrice,
+    outboundSellPrice,
+    returnBuyPrice,
+    returnSellPrice,
+    state.credits,
+    allowPartialLoad
+  );
+  const launchPlans = loadPlan.plans.map((plan, idx) => ({ ...plan, idSuffix: idx }));
+  const totalLaunchCost = launchPlans.reduce((sum, plan) => sum + plan.upfrontCost, 0);
+  const totalEscrow = launchPlans.reduce((sum, plan) => sum + plan.escrowReserved, 0);
 
-    return {
-      idSuffix: idx,
-      ship,
-      units,
-      outboundCost,
-      returnEscrow,
-      durationSeconds,
-      estimatedProfit
-    };
-  });
+  if (launchPlans.length === 0) {
+    return { ok: false, message: "Insufficient credits for even a partial load." };
+  }
+
+  const isPartialLoad = launchPlans.some((plan) => plan.units < plan.capacityUnits);
 
   if (state.credits < totalLaunchCost) {
     return {
       ok: false,
-      message: `Need ${formatCredits(totalLaunchCost)} (outbound + return escrow).`
+      message: `Need ${formatCredits(totalLaunchCost)} for the selected load.`
     };
   }
 
@@ -1095,7 +1177,18 @@ function launchTradeMission(state, destinationSystemId, outboundCommodityId, ret
   state.escrowCredits += totalEscrow;
 
   for (const plan of launchPlans) {
-    const { ship, units, outboundCost, returnEscrow, durationSeconds, estimatedProfit, idSuffix } = plan;
+    const {
+      ship,
+      units,
+      capacityUnits,
+      outboundCost,
+      escrowReserved,
+      estimatedOutboundRevenue,
+      estimatedReturnCost,
+      durationSeconds,
+      estimatedProfit,
+      idSuffix
+    } = plan;
     applyMarketTrade(home, outboundCommodityId, "buy");
     ship.status = "mission";
 
@@ -1106,13 +1199,20 @@ function launchTradeMission(state, destinationSystemId, outboundCommodityId, ret
       outboundCommodityId,
       returnCommodityId,
       units,
+      capacityUnits,
       outboundBuyPrice,
       outboundSellPrice,
       returnBuyPrice,
       returnSellPrice,
+      estimatedOutboundRevenue,
+      estimatedReturnCost,
       estimatedProfit,
       outboundCost,
-      returnEscrow,
+      escrowReserved,
+      arrivalResolved: false,
+      actualOutboundRevenue: 0,
+      actualReturnCost: 0,
+      returnUnits: 0,
       remainingSeconds: durationSeconds,
       durationSeconds,
       createdAt: nowIso()
@@ -1126,10 +1226,60 @@ function launchTradeMission(state, destinationSystemId, outboundCommodityId, ret
   const returnCargoName = COMMODITY_INDEX[returnCommodityId].name;
   pushLog(
     state,
-    `Launched ${selectedShips.length} ship${selectedShips.length > 1 ? "s" : ""} to ${destination.name}: ${outboundCargoName} out, ${returnCargoName} back (total cost ${formatCredits(totalLaunchCost)}).`
+    `Launched ${launchPlans.length} ship${launchPlans.length > 1 ? "s" : ""} to ${destination.name}: ${outboundCargoName} out, ${returnCargoName} back (${isPartialLoad ? "partial load, " : ""}upfront ${formatCredits(totalLaunchCost)}).`
   );
 
   return { ok: true };
+}
+
+function resolveTradeMissionArrival(state, mission) {
+  if (mission.arrivalResolved) {
+    return;
+  }
+
+  const ship = findMerchantShip(state, mission.shipId);
+  const destination = findSystem(state, mission.destinationSystemId);
+  if (!destination) {
+    mission.arrivalResolved = true;
+    return;
+  }
+
+  const outboundSellPrice = destination.prices[mission.outboundCommodityId];
+  const actualOutboundRevenue = outboundSellPrice * mission.units;
+  state.credits += actualOutboundRevenue;
+  applyMarketTrade(destination, mission.outboundCommodityId, "sell");
+
+  const escrowReserved = Number.isFinite(mission.escrowReserved) ? mission.escrowReserved : 0;
+  state.credits += escrowReserved;
+  state.escrowCredits = Math.max(0, state.escrowCredits - escrowReserved);
+
+  const returnBuyPrice = destination.prices[mission.returnCommodityId];
+  const affordableReturnUnits = Math.min(
+    mission.units,
+    Math.floor(state.credits / Math.max(1, returnBuyPrice))
+  );
+  const actualReturnCost = returnBuyPrice * affordableReturnUnits;
+  state.credits -= actualReturnCost;
+  if (affordableReturnUnits > 0) {
+    applyMarketTrade(destination, mission.returnCommodityId, "buy");
+  }
+
+  mission.arrivalResolved = true;
+  mission.actualOutboundRevenue = actualOutboundRevenue;
+  mission.actualReturnCost = actualReturnCost;
+  mission.returnUnits = affordableReturnUnits;
+  mission.outboundSellPrice = outboundSellPrice;
+  mission.returnBuyPrice = returnBuyPrice;
+
+  const shipLabel = ship ? getShipDisplayName(ship) : mission.shipId.toUpperCase();
+  if (affordableReturnUnits < mission.units) {
+    pushLog(
+      state,
+      `${shipLabel} reached ${destination.name}. Return cargo loaded partially (${affordableReturnUnits}/${mission.units} units).`
+    );
+  }
+
+  recomputeAllSystemPrices(state);
 }
 
 function resolveTradeMission(state, mission) {
@@ -1138,38 +1288,25 @@ function resolveTradeMission(state, mission) {
     ship.status = "idle";
   }
 
-  const destination = findSystem(state, mission.destinationSystemId);
   const home = getHomeSystem(state);
-  const outboundSellPrice = destination
-    ? destination.prices[mission.outboundCommodityId]
-    : mission.outboundSellPrice;
-  const returnBuyPrice = destination ? destination.prices[mission.returnCommodityId] : mission.returnBuyPrice;
+  const destination = findSystem(state, mission.destinationSystemId);
   const returnSellPrice = home ? home.prices[mission.returnCommodityId] : mission.returnSellPrice;
-
-  const outboundRevenue = outboundSellPrice * mission.units;
-  const returnRevenue = returnSellPrice * mission.units;
+  const outboundRevenue = Number.isFinite(mission.actualOutboundRevenue) ? mission.actualOutboundRevenue : 0;
+  const returnUnits = Number.isFinite(mission.returnUnits) ? mission.returnUnits : mission.units;
+  const returnRevenue = returnSellPrice * returnUnits;
   const outboundCost = Number.isFinite(mission.outboundCost)
     ? mission.outboundCost
     : mission.outboundBuyPrice * mission.units;
-  const returnEscrow = Number.isFinite(mission.returnEscrow)
-    ? mission.returnEscrow
-    : mission.returnBuyPrice * mission.units;
+  const returnCost = Number.isFinite(mission.actualReturnCost) ? mission.actualReturnCost : 0;
   const totalRevenue = outboundRevenue + returnRevenue;
-  const totalCost = outboundCost + returnEscrow;
+  const totalCost = outboundCost + returnCost;
   const profit = totalRevenue - totalCost;
 
-  state.credits += outboundRevenue;
-  if (destination) {
-    applyMarketTrade(destination, mission.outboundCommodityId, "sell");
-  }
-  state.escrowCredits = Math.max(0, state.escrowCredits - returnEscrow);
-  if (destination) {
-    applyMarketTrade(destination, mission.returnCommodityId, "buy");
-  }
   state.credits += returnRevenue;
   if (home) {
     applyMarketTrade(home, mission.returnCommodityId, "sell");
   }
+  recomputeAllSystemPrices(state);
   recomputeAllSystemPrices(state);
   const outboundCargoName = COMMODITY_INDEX[mission.outboundCommodityId]
     ? COMMODITY_INDEX[mission.outboundCommodityId].name
@@ -1394,6 +1531,11 @@ function advanceGameBySeconds(state, elapsedSeconds) {
   for (const mission of state.tradeMissions) {
     mission.remainingSeconds -= seconds;
     timersAdvanced = true;
+    const halfDuration = Math.max(1, Math.floor(mission.durationSeconds / 2));
+    if (!mission.arrivalResolved && mission.remainingSeconds <= halfDuration) {
+      resolveTradeMissionArrival(state, mission);
+      majorStateChange = true;
+    }
   }
 
   const completedTrades = state.tradeMissions
@@ -1603,10 +1745,6 @@ function renderHeader() {
       <span class="stat-value">${idle} / ${total} Idle</span>
     </article>
     <article class="stat-chip">
-      <span class="stat-label">Cargo Size</span>
-      <span class="stat-value">${gameState.cargoSize} units</span>
-    </article>
-    <article class="stat-chip">
       <span class="stat-label">Scout Ship</span>
       <span class="stat-value">${scoutText}</span>
     </article>
@@ -1712,19 +1850,36 @@ function renderTradePlanner() {
   const outboundSell = system.prices[outboundId];
   const returnBuy = system.prices[returnId];
   const returnSell = home.prices[returnId];
-  const totalMissionCost = selectedShips.reduce((sum, ship) => {
-    const units = getShipCargoUnits(gameState, ship);
-    return sum + (outboundBuy + returnBuy) * units;
-  }, 0);
-  const totalProfit = selectedShips.reduce((sum, ship) => {
-    const units = getShipCargoUnits(gameState, ship);
-    return sum + (outboundSell - outboundBuy + (returnSell - returnBuy)) * units;
-  }, 0);
+  const fullLoadPlan = buildTradeLoadPlan(
+    gameState,
+    selectedShips,
+    system.distance,
+    outboundBuy,
+    outboundSell,
+    returnBuy,
+    returnSell,
+    Number.POSITIVE_INFINITY,
+    false
+  );
+  const affordablePlan = buildTradeLoadPlan(
+    gameState,
+    selectedShips,
+    system.distance,
+    outboundBuy,
+    outboundSell,
+    returnBuy,
+    returnSell,
+    gameState.credits,
+    true
+  );
+  const totalMissionCost = fullLoadPlan.plans.reduce((sum, plan) => sum + plan.upfrontCost, 0);
+  const totalProfit = fullLoadPlan.plans.reduce((sum, plan) => sum + plan.estimatedProfit, 0);
   const perShipMissionCost = selectedShips.length > 0 ? totalMissionCost / selectedShips.length : 0;
   const durations = selectedShips.map((ship) => getShipTradeDuration(system.distance, ship));
   const slowestDuration = durations.length > 0 ? Math.max(...durations) : getTradeMissionDuration(system.distance);
   const fastestDuration = durations.length > 0 ? Math.min(...durations) : getTradeMissionDuration(system.distance);
-  const canLaunch = selectedShips.length > 0 && gameState.credits >= totalMissionCost;
+  const canLaunchFull = selectedShips.length > 0 && gameState.credits >= totalMissionCost;
+  const canLaunchPartial = selectedShips.length > 0 && affordablePlan.loadedUnits > 0 && affordablePlan.loadedUnits < fullLoadPlan.totalCapacityUnits;
 
   const outboundButtons = COMMODITIES.map((commodity) => {
     const active = outboundId === commodity.id ? "active" : "";
@@ -1778,13 +1933,15 @@ function renderTradePlanner() {
         <div class="ship-select-grid">${shipButtons}</div>
       </div>
       <p class="section-subtitle">Selected Ships: <strong>${selectedShips.length}</strong> / ${idleShips.length}</p>
+      <p class="section-subtitle">Selected Cargo: <strong>${fullLoadPlan.totalCapacityUnits} units full</strong>${canLaunchPartial ? ` • partial available <strong>${affordablePlan.loadedUnits} units</strong>` : ""}</p>
       <p class="section-subtitle">Mission Duration Range: <strong>${formatSeconds(fastestDuration)} - ${formatSeconds(slowestDuration)}</strong></p>
       <p class="section-subtitle">Per-Ship Mission Cost: <strong>${formatCredits(perShipMissionCost)}</strong></p>
-      <p class="section-subtitle">Total Mission Cost: <strong>${formatCredits(totalMissionCost)}</strong></p>
+      <p class="section-subtitle">Upfront Cost: <strong>${formatCredits(totalMissionCost)}</strong></p>
       <p class="section-subtitle">Estimated Result: <span class="${totalProfit >= 0 ? "pos" : "neg"}">${totalProfit >= 0 ? "+" : ""}${formatCredits(totalProfit)}</span></p>
-      <button type="button" id="launchPlannedTradeBtn" class="btn" ${canLaunch ? "" : "disabled"}>
-        ${selectedShips.length === 0 ? "Select At Least One Ship" : gameState.credits < totalMissionCost ? "Insufficient Credits" : "Launch Trade Mission"}
+      <button type="button" id="launchPlannedTradeBtn" class="btn" ${canLaunchFull ? "" : "disabled"}>
+        ${selectedShips.length === 0 ? "Select At Least One Ship" : gameState.credits < totalMissionCost ? "Insufficient Credits for Full Load" : "Launch Full Load"}
       </button>
+      ${canLaunchPartial ? `<button type="button" id="launchPartialTradeBtn" class="btn secondary">Launch Partial Load (${affordablePlan.loadedUnits} units)</button>` : ""}
     </div>
   `;
 }
@@ -1792,9 +1949,9 @@ function renderTradePlanner() {
 function renderFleet() {
   const idle = getIdleMerchantShips(gameState).length;
   const totalMissionEscrow = gameState.tradeMissions.reduce((sum, mission) => {
-    const missionEscrow = Number.isFinite(mission.returnEscrow)
-      ? mission.returnEscrow
-      : mission.returnBuyPrice * mission.units;
+    const missionEscrow = !mission.arrivalResolved && Number.isFinite(mission.escrowReserved)
+      ? mission.escrowReserved
+      : 0;
     return sum + missionEscrow;
   }, 0);
 
@@ -1809,22 +1966,26 @@ function renderFleet() {
               ? mission.estimatedProfit
               : (mission.outboundSellPrice - mission.outboundBuyPrice + (mission.returnSellPrice - mission.returnBuyPrice)) *
                 mission.units;
-            const missionEscrow = Number.isFinite(mission.returnEscrow)
-              ? mission.returnEscrow
-              : mission.returnBuyPrice * mission.units;
+            const missionEscrow = !mission.arrivalResolved && Number.isFinite(mission.escrowReserved)
+              ? mission.escrowReserved
+              : 0;
             const halfDuration = Math.max(1, Math.floor(mission.durationSeconds / 2));
-            const outboundRemaining = Math.max(0, mission.remainingSeconds - halfDuration);
-            const returnRemaining = Math.max(0, Math.min(halfDuration, mission.remainingSeconds));
-            const phase = mission.remainingSeconds > halfDuration ? "Outbound Leg" : "Return Leg";
-            const phaseEta = mission.remainingSeconds > halfDuration ? outboundRemaining : returnRemaining;
+            const outboundRemaining = mission.arrivalResolved
+              ? 0
+              : Math.max(0, mission.remainingSeconds - halfDuration);
+            const returnRemaining = mission.arrivalResolved
+              ? Math.max(0, mission.remainingSeconds)
+              : Math.max(0, Math.min(halfDuration, mission.remainingSeconds));
+            const phase = mission.arrivalResolved ? "Return Leg" : "Outbound Leg";
+            const phaseEta = mission.arrivalResolved ? returnRemaining : outboundRemaining;
             const elapsed = Math.max(0, mission.durationSeconds - mission.remainingSeconds);
             const progress = Math.min(100, Math.max(0, (elapsed / mission.durationSeconds) * 100));
             return `
           <article class="mission-item">
             <strong style="color:${ship?.nameColor || "#ffffff"}">${escapeHtml(ship ? getShipDisplayName(ship) : mission.shipId.toUpperCase())}</strong> <span class="section-subtitle">(${mission.shipId.toUpperCase()})</span> <-> ${destination ? destination.name : "Unknown"}<br />
             Outbound: ${renderCommodityLabel(mission.outboundCommodityId, destination)} (${mission.units} units)<br />
-            Return: ${renderCommodityLabel(mission.returnCommodityId, destination)} (${mission.units} units)<br />
-            Escrow Reserved: <strong>${formatCredits(missionEscrow)}</strong><br />
+            Return: ${renderCommodityLabel(mission.returnCommodityId, destination)} (${mission.returnUnits || mission.units} units)<br />
+            Escrow ${mission.arrivalResolved ? "Released" : "Reserved"}: <strong>${formatCredits(missionEscrow)}</strong><br />
             Phase: <strong>${phase}</strong> (ETA ${formatSeconds(phaseEta)})<br />
             Outbound ETA: ${formatSeconds(outboundRemaining)} | Return ETA: ${formatSeconds(returnRemaining)}<br />
             Total ETA: <strong>${formatSeconds(mission.remainingSeconds)}</strong><br />
@@ -2126,7 +2287,31 @@ function onRootClick(event) {
       systemId,
       tradePlannerState.outboundCommodityId,
       tradePlannerState.returnCommodityId,
-      tradePlannerState.selectedShipIds
+      tradePlannerState.selectedShipIds,
+      false
+    );
+    if (!result.ok) {
+      pushLog(gameState, `Trade launch failed: ${result.message}`);
+    } else {
+      closeTradePlanner();
+    }
+    saveAndRender();
+    return;
+  }
+
+  const launchPartialBtn = rawTarget.closest("#launchPartialTradeBtn");
+  if (launchPartialBtn instanceof HTMLElement) {
+    if (!tradePlannerState) {
+      return;
+    }
+    const systemId = tradePlannerState.systemId;
+    const result = launchTradeMission(
+      gameState,
+      systemId,
+      tradePlannerState.outboundCommodityId,
+      tradePlannerState.returnCommodityId,
+      tradePlannerState.selectedShipIds,
+      true
     );
     if (!result.ok) {
       pushLog(gameState, `Trade launch failed: ${result.message}`);
@@ -2156,7 +2341,8 @@ function onRootClick(event) {
       systemId,
       COMMODITIES[0].id,
       COMMODITIES[1]?.id || COMMODITIES[0].id,
-      [getIdleMerchantShips(gameState)[0]?.id].filter(Boolean)
+      [getIdleMerchantShips(gameState)[0]?.id].filter(Boolean),
+      false
     );
     if (!result.ok) {
       pushLog(gameState, `Trade launch failed: ${result.message}`);
