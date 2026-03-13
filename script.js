@@ -41,6 +41,7 @@ const BALANCE = {
   SCOUT_BASE_MISSION_SECONDS: 20 * 60,
   SCOUT_MISSION_INCREMENT_SECONDS: 5 * 60,
   FINANCE_RATE_PER_MINUTE: 0.01,
+  FINANCE_MIN_BILLED_MINUTES: 5,
   MARKET_PRESSURE_BUY_STEP: 0.03,
   MARKET_PRESSURE_SELL_STEP: 0.03,
   MARKET_PRESSURE_MAX: 0.25,
@@ -372,7 +373,10 @@ function getTradeEscrowPerUnit(outboundSellPriceEstimate, returnBuyPriceEstimate
 
 function getMissionFinanceInterest(principal, durationSeconds) {
   const borrowed = Math.max(0, Number(principal) || 0);
-  const minutes = Math.max(0, Number(durationSeconds) || 0) / 60;
+  const minutes = Math.max(
+    BALANCE.FINANCE_MIN_BILLED_MINUTES,
+    Math.ceil(Math.max(0, Number(durationSeconds) || 0) / 60)
+  );
   return Math.round(borrowed * BALANCE.FINANCE_RATE_PER_MINUTE * minutes);
 }
 
