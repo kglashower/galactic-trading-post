@@ -40,6 +40,7 @@ const BALANCE = {
   TRADE_TIME_PER_DISTANCE: 14,
   SCOUT_BASE_MISSION_SECONDS: 20 * 60,
   SCOUT_MISSION_INCREMENT_SECONDS: 5 * 60,
+  FINANCE_RATE_PER_MINUTE: 0.01,
   MARKET_PRESSURE_BUY_STEP: 0.03,
   MARKET_PRESSURE_SELL_STEP: 0.03,
   MARKET_PRESSURE_MAX: 0.25,
@@ -369,6 +370,17 @@ function getTradeEscrowPerUnit(outboundSellPriceEstimate, returnBuyPriceEstimate
   return Math.max(0, returnBuyPriceEstimate - outboundSellPriceEstimate);
 }
 
+function getMissionFinanceInterest(principal, durationSeconds) {
+  const borrowed = Math.max(0, Number(principal) || 0);
+  const minutes = Math.max(0, Number(durationSeconds) || 0) / 60;
+  return Math.round(borrowed * BALANCE.FINANCE_RATE_PER_MINUTE * minutes);
+}
+
+function getMissionFinanceRepayment(principal, durationSeconds) {
+  const borrowed = Math.max(0, Number(principal) || 0);
+  return borrowed + getMissionFinanceInterest(borrowed, durationSeconds);
+}
+
 function buildTradeLoadPlan(state, selectedShips, distance, outboundBuyPrice, outboundSellPriceEstimate, returnBuyPriceEstimate, returnSellPriceEstimate, availableCredits, allowPartialLoad) {
   const escrowPerUnit = getTradeEscrowPerUnit(outboundSellPriceEstimate, returnBuyPriceEstimate);
   const upfrontCostPerUnit = outboundBuyPrice + escrowPerUnit;
@@ -430,7 +442,11 @@ function buildTradeLoadPlan(state, selectedShips, distance, outboundBuyPrice, ou
     totalCapacityUnits,
     loadedUnits: plans.reduce((sum, plan) => sum + plan.units, 0),
     upfrontCostPerUnit,
-    affordableUnits
+    affordableUnits,
+    totalUpfrontCost: plans.reduce((sum, plan) => sum + plan.upfrontCost, 0),
+    totalEstimatedProfit: plans.reduce((sum, plan) => sum + plan.estimatedProfit, 0),
+    totalEstimatedOutboundRevenue: plans.reduce((sum, plan) => sum + plan.estimatedOutboundRevenue, 0),
+    totalEstimatedReturnCost: plans.reduce((sum, plan) => sum + plan.estimatedReturnCost, 0)
   };
 }
 
@@ -907,6 +923,14 @@ function normalizeLoadedState(state) {
           : Number.isFinite(m.returnEscrow)
             ? m.returnEscrow
             : Math.max(0, estimatedReturnCost - estimatedOutboundRevenue);
+        const borrowedAmount = Number.isFinite(m.borrowedAmount) ? Math.max(0, m.borrowedAmount) : 0;
+        const financeInterest = Number.isFinite(m.financeInterest)
+          ? Math.max(0, m.financeInterest)
+          : getMissionFinanceInterest(borrowedAmount, durationSeconds);
+        const financeRepayment = Number.isFinite(m.financeRepayment)
+          ? Math.max(0, m.financeRepayment)
+          : borrowedAmount + financeInterest;
+        const financed = Boolean(m.financed) || borrowedAmount > 0;
 
         return {
           id: m.id || `tm-${Date.now()}-${i}`,
@@ -924,6 +948,10 @@ function normalizeLoadedState(state) {
           estimatedProfit,
           outboundCost,
           escrowReserved,
+          financed,
+          borrowedAmount,
+          financeInterest,
+          financeRepayment,
           arrivalResolved: Boolean(m.arrivalResolved),
           actualOutboundRevenue: Number.isFinite(m.actualOutboundRevenue) ? m.actualOutboundRevenue : 0,
           actualReturnCost: Number.isFinite(m.actualReturnCost) ? m.actualReturnCost : 0,
@@ -1110,11 +1138,13 @@ function canLaunchTrade(state) {
   return getIdleMerchantShips(state).length > 0;
 }
 
-function launchTradeMission(state, destinationSystemId, outboundCommodityId, returnCommodityId, shipIds, allowPartialLoad = false) {
+function launchTradeMission(state, destinationSystemId, outboundCommodityId, returnCommodityId, shipIds, options = {}) {
   const destination = findSystem(state, destinationSystemId);
   const home = getHomeSystem(state);
   const idleShips = getIdleMerchantShips(state);
   const requestedShipIds = Array.isArray(shipIds) ? shipIds : [];
+  const allowPartialLoad = Boolean(options.allowPartialLoad);
+  const useFinancing = Boolean(options.useFinancing);
 
   if (!destination || destination.id === state.homeSystemId) {
     return { ok: false, message: "Invalid destination." };
@@ -1157,7 +1187,7 @@ function launchTradeMission(state, destinationSystemId, outboundCommodityId, ret
     allowPartialLoad
   );
   const launchPlans = loadPlan.plans.map((plan, idx) => ({ ...plan, idSuffix: idx }));
-  const totalLaunchCost = launchPlans.reduce((sum, plan) => sum + plan.upfrontCost, 0);
+  const totalLaunchCost = loadPlan.totalUpfrontCost;
   const totalEscrow = launchPlans.reduce((sum, plan) => sum + plan.escrowReserved, 0);
 
   if (launchPlans.length === 0) {
@@ -1166,15 +1196,20 @@ function launchTradeMission(state, destinationSystemId, outboundCommodityId, ret
 
   const isPartialLoad = launchPlans.some((plan) => plan.units < plan.capacityUnits);
 
-  if (state.credits < totalLaunchCost) {
+  if (!useFinancing && state.credits < totalLaunchCost) {
     return {
       ok: false,
       message: `Need ${formatCredits(totalLaunchCost)} for the selected load.`
     };
   }
 
-  state.credits -= totalLaunchCost;
+  const borrowedAmount = useFinancing ? Math.max(0, totalLaunchCost - state.credits) : 0;
+  const cashContribution = totalLaunchCost - borrowedAmount;
+
+  state.credits -= cashContribution;
   state.escrowCredits += totalEscrow;
+
+  const createdMissions = [];
 
   for (const plan of launchPlans) {
     const {
@@ -1209,6 +1244,10 @@ function launchTradeMission(state, destinationSystemId, outboundCommodityId, ret
       estimatedProfit,
       outboundCost,
       escrowReserved,
+      financed: useFinancing,
+      borrowedAmount: 0,
+      financeInterest: 0,
+      financeRepayment: 0,
       arrivalResolved: false,
       actualOutboundRevenue: 0,
       actualReturnCost: 0,
@@ -1218,7 +1257,30 @@ function launchTradeMission(state, destinationSystemId, outboundCommodityId, ret
       createdAt: nowIso()
     };
 
+    if (useFinancing) {
+      const missionBorrowedAmount = Math.round((borrowedAmount * plan.upfrontCost) / Math.max(1, totalLaunchCost));
+      mission.borrowedAmount = missionBorrowedAmount;
+      mission.financeInterest = getMissionFinanceInterest(missionBorrowedAmount, durationSeconds);
+      mission.financeRepayment = mission.borrowedAmount + mission.financeInterest;
+      mission.estimatedProfit -= mission.financeInterest;
+    }
+
     state.tradeMissions.push(mission);
+    createdMissions.push(mission);
+  }
+  if (useFinancing && createdMissions.length > 0) {
+    const plannedBorrowed = createdMissions.reduce((sum, mission) => sum + mission.borrowedAmount, 0);
+    const borrowDelta = borrowedAmount - plannedBorrowed;
+    if (borrowDelta !== 0) {
+      const lastMission = createdMissions[createdMissions.length - 1];
+      if (lastMission) {
+        const previousInterest = lastMission.financeInterest;
+        lastMission.borrowedAmount += borrowDelta;
+        lastMission.financeInterest = getMissionFinanceInterest(lastMission.borrowedAmount, lastMission.durationSeconds);
+        lastMission.financeRepayment = lastMission.borrowedAmount + lastMission.financeInterest;
+        lastMission.estimatedProfit -= lastMission.financeInterest - previousInterest;
+      }
+    }
   }
   recomputeAllSystemPrices(state);
 
@@ -1226,7 +1288,7 @@ function launchTradeMission(state, destinationSystemId, outboundCommodityId, ret
   const returnCargoName = COMMODITY_INDEX[returnCommodityId].name;
   pushLog(
     state,
-    `Launched ${launchPlans.length} ship${launchPlans.length > 1 ? "s" : ""} to ${destination.name}: ${outboundCargoName} out, ${returnCargoName} back (${isPartialLoad ? "partial load, " : ""}upfront ${formatCredits(totalLaunchCost)}).`
+    `Launched ${launchPlans.length} ship${launchPlans.length > 1 ? "s" : ""} to ${destination.name}: ${outboundCargoName} out, ${returnCargoName} back (${isPartialLoad ? "partial load, " : ""}upfront ${formatCredits(totalLaunchCost)}${useFinancing ? `, financed ${formatCredits(borrowedAmount)}` : ""}).`
   );
 
   return { ok: true };
@@ -1300,9 +1362,13 @@ function resolveTradeMission(state, mission) {
   const returnCost = Number.isFinite(mission.actualReturnCost) ? mission.actualReturnCost : 0;
   const totalRevenue = outboundRevenue + returnRevenue;
   const totalCost = outboundCost + returnCost;
-  const profit = totalRevenue - totalCost;
+  const financeRepayment = Number.isFinite(mission.financeRepayment) ? mission.financeRepayment : 0;
+  const profit = totalRevenue - totalCost - financeRepayment;
 
   state.credits += returnRevenue;
+  if (financeRepayment > 0) {
+    state.credits -= financeRepayment;
+  }
   if (home) {
     applyMarketTrade(home, mission.returnCommodityId, "sell");
   }
@@ -1319,7 +1385,7 @@ function resolveTradeMission(state, mission) {
   const shipLabel = ship ? getShipDisplayName(ship) : "Ship";
   pushLog(
     state,
-    `${shipLabel} completed round trip to ${destination ? destination.name : "unknown"} (${outboundCargoName} out, ${returnCargoName} back): ${signClass}${formatCredits(profit)}.`
+    `${shipLabel} completed round trip to ${destination ? destination.name : "unknown"} (${outboundCargoName} out, ${returnCargoName} back): ${signClass}${formatCredits(profit)}${financeRepayment > 0 ? ` after repaying ${formatCredits(financeRepayment)}` : ""}.`
   );
 }
 
@@ -1872,14 +1938,23 @@ function renderTradePlanner() {
     gameState.credits,
     true
   );
-  const totalMissionCost = fullLoadPlan.plans.reduce((sum, plan) => sum + plan.upfrontCost, 0);
-  const totalProfit = fullLoadPlan.plans.reduce((sum, plan) => sum + plan.estimatedProfit, 0);
+  const totalMissionCost = fullLoadPlan.totalUpfrontCost;
+  const totalProfit = fullLoadPlan.totalEstimatedProfit;
   const perShipMissionCost = selectedShips.length > 0 ? totalMissionCost / selectedShips.length : 0;
   const durations = selectedShips.map((ship) => getShipTradeDuration(system.distance, ship));
   const slowestDuration = durations.length > 0 ? Math.max(...durations) : getTradeMissionDuration(system.distance);
   const fastestDuration = durations.length > 0 ? Math.min(...durations) : getTradeMissionDuration(system.distance);
   const canLaunchFull = selectedShips.length > 0 && gameState.credits >= totalMissionCost;
   const canLaunchPartial = selectedShips.length > 0 && affordablePlan.loadedUnits > 0 && affordablePlan.loadedUnits < fullLoadPlan.totalCapacityUnits;
+  const financeBorrowed = selectedShips.length > 0 ? Math.max(0, totalMissionCost - gameState.credits) : 0;
+  const financeInterest = selectedShips.length > 0
+    ? fullLoadPlan.plans.reduce((sum, plan) => sum + getMissionFinanceInterest(
+      (financeBorrowed * plan.upfrontCost) / Math.max(1, totalMissionCost),
+      plan.durationSeconds
+    ), 0)
+    : 0;
+  const financedProfit = totalProfit - financeInterest;
+  const canLaunchFinanced = selectedShips.length > 0 && financeBorrowed > 0 && fullLoadPlan.loadedUnits > 0;
 
   const outboundButtons = COMMODITIES.map((commodity) => {
     const active = outboundId === commodity.id ? "active" : "";
@@ -1938,10 +2013,12 @@ function renderTradePlanner() {
       <p class="section-subtitle">Per-Ship Mission Cost: <strong>${formatCredits(perShipMissionCost)}</strong></p>
       <p class="section-subtitle">Upfront Cost: <strong>${formatCredits(totalMissionCost)}</strong></p>
       <p class="section-subtitle">Estimated Result: <span class="${totalProfit >= 0 ? "pos" : "neg"}">${totalProfit >= 0 ? "+" : ""}${formatCredits(totalProfit)}</span></p>
+      ${canLaunchFinanced ? `<p class="section-subtitle">Finance Option: borrow <strong>${formatCredits(financeBorrowed)}</strong>, repay <strong>${formatCredits(financeBorrowed + financeInterest)}</strong>, financed result <span class="${financedProfit >= 0 ? "pos" : "neg"}">${financedProfit >= 0 ? "+" : ""}${formatCredits(financedProfit)}</span>.</p>` : ""}
       <button type="button" id="launchPlannedTradeBtn" class="btn" ${canLaunchFull ? "" : "disabled"}>
         ${selectedShips.length === 0 ? "Select At Least One Ship" : gameState.credits < totalMissionCost ? "Insufficient Credits for Full Load" : "Launch Full Load"}
       </button>
       ${canLaunchPartial ? `<button type="button" id="launchPartialTradeBtn" class="btn secondary">Launch Partial Load (${affordablePlan.loadedUnits} units)</button>` : ""}
+      ${canLaunchFinanced ? `<button type="button" id="launchFinancedTradeBtn" class="btn secondary">Finance Trade Mission (${formatCredits(financeBorrowed)})</button>` : ""}
     </div>
   `;
 }
@@ -1969,6 +2046,7 @@ function renderFleet() {
             const missionEscrow = !mission.arrivalResolved && Number.isFinite(mission.escrowReserved)
               ? mission.escrowReserved
               : 0;
+            const financeRepayment = Number.isFinite(mission.financeRepayment) ? mission.financeRepayment : 0;
             const halfDuration = Math.max(1, Math.floor(mission.durationSeconds / 2));
             const outboundRemaining = mission.arrivalResolved
               ? 0
@@ -1986,6 +2064,7 @@ function renderFleet() {
             Outbound: ${renderCommodityLabel(mission.outboundCommodityId, destination)} (${mission.units} units)<br />
             Return: ${renderCommodityLabel(mission.returnCommodityId, destination)} (${mission.returnUnits || mission.units} units)<br />
             Escrow ${mission.arrivalResolved ? "Released" : "Reserved"}: <strong>${formatCredits(missionEscrow)}</strong><br />
+            ${financeRepayment > 0 ? `Financing: borrowed <strong>${formatCredits(mission.borrowedAmount)}</strong>, repay <strong>${formatCredits(financeRepayment)}</strong><br />` : ""}
             Phase: <strong>${phase}</strong> (ETA ${formatSeconds(phaseEta)})<br />
             Outbound ETA: ${formatSeconds(outboundRemaining)} | Return ETA: ${formatSeconds(returnRemaining)}<br />
             Total ETA: <strong>${formatSeconds(mission.remainingSeconds)}</strong><br />
@@ -2288,7 +2367,7 @@ function onRootClick(event) {
       tradePlannerState.outboundCommodityId,
       tradePlannerState.returnCommodityId,
       tradePlannerState.selectedShipIds,
-      false
+      { allowPartialLoad: false, useFinancing: false }
     );
     if (!result.ok) {
       pushLog(gameState, `Trade launch failed: ${result.message}`);
@@ -2311,7 +2390,30 @@ function onRootClick(event) {
       tradePlannerState.outboundCommodityId,
       tradePlannerState.returnCommodityId,
       tradePlannerState.selectedShipIds,
-      true
+      { allowPartialLoad: true, useFinancing: false }
+    );
+    if (!result.ok) {
+      pushLog(gameState, `Trade launch failed: ${result.message}`);
+    } else {
+      closeTradePlanner();
+    }
+    saveAndRender();
+    return;
+  }
+
+  const launchFinancedBtn = rawTarget.closest("#launchFinancedTradeBtn");
+  if (launchFinancedBtn instanceof HTMLElement) {
+    if (!tradePlannerState) {
+      return;
+    }
+    const systemId = tradePlannerState.systemId;
+    const result = launchTradeMission(
+      gameState,
+      systemId,
+      tradePlannerState.outboundCommodityId,
+      tradePlannerState.returnCommodityId,
+      tradePlannerState.selectedShipIds,
+      { allowPartialLoad: false, useFinancing: true }
     );
     if (!result.ok) {
       pushLog(gameState, `Trade launch failed: ${result.message}`);
@@ -2342,7 +2444,7 @@ function onRootClick(event) {
       COMMODITIES[0].id,
       COMMODITIES[1]?.id || COMMODITIES[0].id,
       [getIdleMerchantShips(gameState)[0]?.id].filter(Boolean),
-      false
+      { allowPartialLoad: false, useFinancing: false }
     );
     if (!result.ok) {
       pushLog(gameState, `Trade launch failed: ${result.message}`);
