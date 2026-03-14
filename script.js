@@ -24,7 +24,7 @@ const BALANCE = {
   CARGO_SIZE: 10,
   STARTING_MERCHANT_SHIPS: 1,
   STARTING_DISCOVERED_COUNT: 4,
-  REMOTE_SYSTEM_COUNT: 16,
+  REMOTE_SYSTEM_COUNT: 100,
   MERCHANT_SHIP_BASE_COST: 300,
   MERCHANT_SHIP_COST_GROWTH: 1.16,
   CARGO_UPGRADE_BASE_COST: 240,
@@ -49,6 +49,9 @@ const BALANCE = {
   MARKET_PRESSURE_EPSILON: 0.0005,
   MARKET_EVENT_DURATION_SECONDS: 20 * 60,
   MARKET_EVENT_INTERVAL_SECONDS: 10 * 60,
+  STRUCTURAL_EVENT_MIN_SECONDS: 20 * 60 * 60,
+  STRUCTURAL_EVENT_MAX_SECONDS: 30 * 60 * 60,
+  STRUCTURAL_EVENT_SYSTEM_CHANCE: 0.9,
   PRICE_HIGH_MIN: 1.25,
   PRICE_HIGH_MAX: 1.5,
   PRICE_LOW_MIN: 0.58,
@@ -77,6 +80,9 @@ const COMMODITY_ICONS = {
   electronics: "🔌",
   medicine: "🧪"
 };
+const INITIAL_GLOBAL_BASE_PRICES = Object.freeze(
+  Object.fromEntries(COMMODITIES.map((commodity) => [commodity.id, commodity.basePrice]))
+);
 
 const SHIP_NAME_MAX_LENGTH = 20;
 const SHIP_NAME_COLOR_OPTIONS = [
@@ -157,6 +163,28 @@ const MARKET_EVENT_COPY = {
     down: [
       { headline: "Cure Shipment", body: "A major medical convoy delivered enough stock to stabilize treatment demand." },
       { headline: "Clinical Recovery", body: "Case numbers are falling and medicine buyers are stepping back." }
+    ]
+  }
+};
+const STRUCTURAL_EVENT_COPY = {
+  system: {
+    up: [
+      { headline: "Charter Refit", body: "A permanent industrial refit has made local buyers structurally more aggressive." },
+      { headline: "Colonial Expansion", body: "Long-term habitat growth is keeping demand elevated beyond a temporary boom." }
+    ],
+    down: [
+      { headline: "Local Substitution", body: "New local production lines permanently reduced import dependence." },
+      { headline: "Supply Corridor", body: "A stabilized trade corridor has structurally eased procurement pressure." }
+    ]
+  },
+  global: {
+    up: [
+      { headline: "Sector-Wide Shortage", body: "A broad supply squeeze has reset contract pricing across the network." },
+      { headline: "Galactic Tariff Shift", body: "New freight and tariff rules have permanently raised clearing prices." }
+    ],
+    down: [
+      { headline: "Process Breakthrough", body: "A production breakthrough has pushed the galactic baseline downward." },
+      { headline: "Distribution Reform", body: "More efficient logistics have permanently lowered market clearing costs." }
     ]
   }
 };
@@ -481,6 +509,35 @@ function createZeroPressureMap() {
   return pressure;
 }
 
+function createZeroTierShiftMap() {
+  const shifts = {};
+  for (const commodity of COMMODITIES) {
+    shifts[commodity.id] = 0;
+  }
+  return shifts;
+}
+
+function createBasePriceMap() {
+  return { ...INITIAL_GLOBAL_BASE_PRICES };
+}
+
+function applyGlobalBasePrices(state) {
+  const source = state?.globalBasePrices || INITIAL_GLOBAL_BASE_PRICES;
+  for (const commodity of COMMODITIES) {
+    const nextBasePrice = Number.isFinite(source[commodity.id]) ? Math.max(1, Math.round(source[commodity.id])) : INITIAL_GLOBAL_BASE_PRICES[commodity.id];
+    commodity.basePrice = nextBasePrice;
+    if (COMMODITY_INDEX[commodity.id]) {
+      COMMODITY_INDEX[commodity.id].basePrice = nextBasePrice;
+    }
+  }
+}
+
+function getStructuralEventIntervalSeconds(sequence) {
+  const span = BALANCE.STRUCTURAL_EVENT_MAX_SECONDS - BALANCE.STRUCTURAL_EVENT_MIN_SECONDS;
+  const offset = Math.round(span * seededFraction(`structural-event-interval:${sequence}`));
+  return BALANCE.STRUCTURAL_EVENT_MIN_SECONDS + offset;
+}
+
 function getBaseMarketTierIndex(system, commodityId) {
   const basePrice = COMMODITY_INDEX[commodityId]?.basePrice;
   const localBasePrice = system?.basePrices?.[commodityId];
@@ -506,10 +563,21 @@ function getCommodityEventShift(state, systemId, commodityId) {
   );
 }
 
+function getCommodityPermanentShift(system, commodityId) {
+  if (!system?.permanentTierShifts || !Number.isFinite(system.permanentTierShifts[commodityId])) {
+    return 0;
+  }
+  return system.permanentTierShifts[commodityId];
+}
+
 function recomputeSystemPrices(state, system) {
   for (const commodity of COMMODITIES) {
     const baseTierIndex = getBaseMarketTierIndex(system, commodity.id);
-    const shiftedTierIndex = clamp(baseTierIndex + getCommodityEventShift(state, system.id, commodity.id), 0, MARKET_TIER_DEFS.length - 1);
+    const shiftedTierIndex = clamp(
+      baseTierIndex + getCommodityPermanentShift(system, commodity.id) + getCommodityEventShift(state, system.id, commodity.id),
+      0,
+      MARKET_TIER_DEFS.length - 1
+    );
     const pressure = system.marketPressure[commodity.id] || 0;
     const rawBaseRatio = (system.basePrices[commodity.id] * (1 + pressure)) / COMMODITY_INDEX[commodity.id].basePrice;
     const ratio = shiftedTierIndex === baseTierIndex ? rawBaseRatio : MARKET_TIER_DEFS[shiftedTierIndex].targetRatio;
@@ -729,6 +797,142 @@ function advanceMarketEvents(state, elapsedSeconds) {
   return changed;
 }
 
+function pushStructuralNews(state, item) {
+  state.structuralNews.unshift(item);
+  if (state.structuralNews.length > 12) {
+    state.structuralNews.length = 12;
+  }
+}
+
+function applyPermanentSystemShift(state, system, commodityId, direction, sequence) {
+  if (!system || !COMMODITY_INDEX[commodityId]) {
+    return false;
+  }
+
+  const currentShift = getCommodityPermanentShift(system, commodityId);
+  const nextShift = clamp(currentShift + direction, -2, 2);
+  const baseTierIndex = getBaseMarketTierIndex(system, commodityId);
+  const currentTierIndex = clamp(baseTierIndex + currentShift, 0, MARKET_TIER_DEFS.length - 1);
+  const nextTierIndex = clamp(baseTierIndex + nextShift, 0, MARKET_TIER_DEFS.length - 1);
+  if (nextShift === currentShift || nextTierIndex === currentTierIndex) {
+    return false;
+  }
+
+  system.permanentTierShifts[commodityId] = nextShift;
+  const copyPool = direction > 0 ? STRUCTURAL_EVENT_COPY.system.up : STRUCTURAL_EVENT_COPY.system.down;
+  const copy = copyPool[sequence % copyPool.length];
+  const directionText = direction > 0 ? "one permanent tier higher" : "one permanent tier lower";
+  const item = {
+    id: `se-system-${sequence}-${system.id}-${commodityId}`,
+    kind: "system",
+    systemId: system.id,
+    commodityId,
+    direction,
+    headline: `${system.name}: ${copy.headline}`,
+    body: `${copy.body} ${COMMODITY_INDEX[commodityId].name} now trades ${directionText} in ${system.name}.`,
+    timestamp: nowIso()
+  };
+
+  pushStructuralNews(state, item);
+  pushLog(state, `${item.headline}. ${COMMODITY_INDEX[commodityId].name} permanently shifted in ${system.name}.`);
+  return true;
+}
+
+function applyPermanentGlobalBaseShift(state, commodityId, direction, sequence) {
+  if (!COMMODITY_INDEX[commodityId]) {
+    return false;
+  }
+
+  const multiplier = direction > 0
+    ? randBetween(1.08, 1.16, `structural-global-up:${sequence}:${commodityId}`)
+    : randBetween(0.84, 0.92, `structural-global-down:${sequence}:${commodityId}`);
+  const currentBasePrice = state.globalBasePrices[commodityId] || INITIAL_GLOBAL_BASE_PRICES[commodityId];
+  const nextBasePrice = clampPositiveInt(currentBasePrice * multiplier);
+  if (nextBasePrice === currentBasePrice) {
+    return false;
+  }
+
+  const ratio = nextBasePrice / Math.max(1, currentBasePrice);
+  state.globalBasePrices[commodityId] = nextBasePrice;
+  for (const system of state.systems) {
+    system.basePrices[commodityId] = clampPositiveInt(system.basePrices[commodityId] * ratio);
+    system.prices[commodityId] = clampPositiveInt(system.prices[commodityId] * ratio);
+  }
+  applyGlobalBasePrices(state);
+
+  const copyPool = direction > 0 ? STRUCTURAL_EVENT_COPY.global.up : STRUCTURAL_EVENT_COPY.global.down;
+  const copy = copyPool[sequence % copyPool.length];
+  const item = {
+    id: `se-global-${sequence}-${commodityId}`,
+    kind: "global",
+    systemId: null,
+    commodityId,
+    direction,
+    headline: `Galactic Market: ${copy.headline}`,
+    body: `${copy.body} ${COMMODITY_INDEX[commodityId].name} now has a permanent new galactic base price of ${formatCredits(nextBasePrice)}.`,
+    timestamp: nowIso()
+  };
+
+  pushStructuralNews(state, item);
+  pushLog(state, `${item.headline}. ${COMMODITY_INDEX[commodityId].name} base price is now ${formatCredits(nextBasePrice)}.`);
+  return true;
+}
+
+function spawnStructuralEvent(state) {
+  const sequence = state.structuralEventSequence || 0;
+  const commodityIds = COMMODITIES.map((commodity) => commodity.id);
+  const systemChance = seededFraction(`structural-event-kind:${sequence}`);
+  let changed = false;
+
+  if (systemChance < BALANCE.STRUCTURAL_EVENT_SYSTEM_CHANCE) {
+    const candidateSystems = getDiscoveredSystems(state);
+    if (candidateSystems.length > 0) {
+      for (let attempt = 0; attempt < candidateSystems.length * commodityIds.length; attempt += 1) {
+        const system = candidateSystems[(sequence + attempt) % candidateSystems.length];
+        const commodityId = commodityIds[(sequence * 5 + attempt) % commodityIds.length];
+        const direction = seededFraction(`structural-event-direction:${sequence}:${attempt}`) >= 0.5 ? 1 : -1;
+        if (applyPermanentSystemShift(state, system, commodityId, direction, sequence + attempt)) {
+          changed = true;
+          break;
+        }
+      }
+    }
+  }
+
+  if (!changed) {
+    const commodityId = commodityIds[sequence % commodityIds.length];
+    const direction = seededFraction(`structural-global-direction:${sequence}:${commodityId}`) >= 0.5 ? 1 : -1;
+    changed = applyPermanentGlobalBaseShift(state, commodityId, direction, sequence);
+  }
+
+  state.structuralEventSequence = sequence + 1;
+  state.secondsUntilNextStructuralEvent = getStructuralEventIntervalSeconds(state.structuralEventSequence);
+  return changed;
+}
+
+function advanceStructuralEvents(state, elapsedSeconds) {
+  let changed = false;
+  let secondsRemaining = Math.max(0, Math.floor(elapsedSeconds || 0));
+  if (secondsRemaining <= 0) {
+    return changed;
+  }
+
+  while (secondsRemaining > 0) {
+    const nextTrigger = Math.max(1, state.secondsUntilNextStructuralEvent || getStructuralEventIntervalSeconds(state.structuralEventSequence || 0));
+    const step = Math.min(secondsRemaining, nextTrigger);
+    state.secondsUntilNextStructuralEvent = nextTrigger - step;
+    secondsRemaining -= step;
+
+    if (state.secondsUntilNextStructuralEvent <= 0) {
+      if (spawnStructuralEvent(state)) {
+        changed = true;
+      }
+    }
+  }
+
+  return changed;
+}
+
 function createStarSystems() {
   const remoteNames = pickUniqueSystemNames(BALANCE.REMOTE_SYSTEM_COUNT);
   const systems = [];
@@ -743,6 +947,7 @@ function createStarSystems() {
     typeHigh: [],
     typeLow: [],
     basePrices: { ...homeBasePrices },
+    permanentTierShifts: createZeroTierShiftMap(),
     marketPressure: createZeroPressureMap(),
     prices: { ...homeBasePrices }
   };
@@ -764,6 +969,7 @@ function createStarSystems() {
       typeHigh: [...type.high],
       typeLow: [...type.low],
       basePrices: { ...basePrices },
+      permanentTierShifts: createZeroTierShiftMap(),
       marketPressure: createZeroPressureMap(),
       prices: { ...basePrices }
     });
@@ -809,6 +1015,7 @@ function createNewGameState() {
     credits: BALANCE.STARTING_CREDITS,
     escrowCredits: 0,
     cargoSize: BALANCE.CARGO_SIZE,
+    globalBasePrices: createBasePriceMap(),
     merchantShips,
     scoutShip: {
       owned: false,
@@ -821,6 +1028,9 @@ function createNewGameState() {
     marketEvents: [],
     marketEventSequence: 0,
     secondsUntilNextMarketEvent: BALANCE.MARKET_EVENT_INTERVAL_SECONDS,
+    structuralNews: [],
+    structuralEventSequence: 0,
+    secondsUntilNextStructuralEvent: getStructuralEventIntervalSeconds(0),
     scoutMission: null,
     scoutMissionsLaunched: 0,
     lastUpdatedAt: nowIso(),
@@ -834,6 +1044,7 @@ function createNewGameState() {
     `${merchantShips.length} merchant ship ready. ${getDiscoveredSystems(state).length - 1} nearby systems charted.`
   );
 
+  applyGlobalBasePrices(state);
   initializeMarketEvents(state);
   recomputeAllSystemPrices(state);
 
@@ -862,6 +1073,10 @@ function normalizeLoadedState(state) {
   const rawSystems = Array.isArray(state.systems) && state.systems.length > 0 ? state.systems : createStarSystems();
   const systems = rawSystems.map((system) => {
     const basePrices = system.basePrices && typeof system.basePrices === "object" ? { ...system.basePrices } : { ...system.prices };
+    const permanentTierShifts =
+      system.permanentTierShifts && typeof system.permanentTierShifts === "object"
+        ? { ...createZeroTierShiftMap(), ...system.permanentTierShifts }
+        : createZeroTierShiftMap();
     const marketPressure =
       system.marketPressure && typeof system.marketPressure === "object"
         ? { ...createZeroPressureMap(), ...system.marketPressure }
@@ -869,6 +1084,7 @@ function normalizeLoadedState(state) {
     const normalizedSystem = {
       ...system,
       basePrices,
+      permanentTierShifts,
       marketPressure,
       prices: system.prices && typeof system.prices === "object" ? { ...system.prices } : { ...basePrices }
     };
@@ -987,6 +1203,10 @@ function normalizeLoadedState(state) {
     credits: normalizedCredits,
     escrowCredits: normalizedEscrow,
     cargoSize: Number.isFinite(state.cargoSize) ? state.cargoSize : BALANCE.CARGO_SIZE,
+    globalBasePrices:
+      state.globalBasePrices && typeof state.globalBasePrices === "object"
+        ? { ...createBasePriceMap(), ...state.globalBasePrices }
+        : createBasePriceMap(),
     merchantShips: Array.isArray(state.merchantShips)
       ? state.merchantShips.map((s, i) => ({
           id: s.id || `m-${i + 1}`,
@@ -1039,6 +1259,24 @@ function normalizeLoadedState(state) {
     secondsUntilNextMarketEvent: Number.isFinite(state.secondsUntilNextMarketEvent)
       ? Math.max(1, Math.floor(state.secondsUntilNextMarketEvent))
       : BALANCE.MARKET_EVENT_INTERVAL_SECONDS,
+    structuralNews: Array.isArray(state.structuralNews)
+      ? state.structuralNews
+          .map((item, index) => ({
+            id: item.id || `se-${index}-${Date.now()}`,
+            headline: String(item.headline || ""),
+            body: String(item.body || ""),
+            timestamp: item.timestamp || nowIso(),
+            commodityId: item.commodityId,
+            systemId: item.systemId || null,
+            direction: item.direction < 0 ? -1 : 1,
+            kind: item.kind === "global" ? "global" : "system"
+          }))
+          .slice(0, 12)
+      : [],
+    structuralEventSequence: Number.isFinite(state.structuralEventSequence) ? Math.max(0, Math.floor(state.structuralEventSequence)) : 0,
+    secondsUntilNextStructuralEvent: Number.isFinite(state.secondsUntilNextStructuralEvent)
+      ? Math.max(1, Math.floor(state.secondsUntilNextStructuralEvent))
+      : getStructuralEventIntervalSeconds(Number.isFinite(state.structuralEventSequence) ? state.structuralEventSequence : 0),
     scoutMission:
       state.scoutMission && typeof state.scoutMission === "object"
         ? {
@@ -1088,6 +1326,7 @@ function normalizeLoadedState(state) {
   if (safe.marketEvents.length === 0) {
     initializeMarketEvents(safe);
   }
+  applyGlobalBasePrices(safe);
   recomputeAllSystemPrices(safe);
 
   return safe;
@@ -1369,8 +1608,9 @@ function resolveTradeMission(state, mission) {
   const returnCost = Number.isFinite(mission.actualReturnCost) ? mission.actualReturnCost : 0;
   const totalRevenue = outboundRevenue + returnRevenue;
   const totalCost = outboundCost + returnCost;
+  const financeInterest = Number.isFinite(mission.financeInterest) ? mission.financeInterest : 0;
   const financeRepayment = Number.isFinite(mission.financeRepayment) ? mission.financeRepayment : 0;
-  const profit = totalRevenue - totalCost - financeRepayment;
+  const profit = totalRevenue - totalCost - financeInterest;
 
   state.credits += returnRevenue;
   if (financeRepayment > 0) {
@@ -1392,7 +1632,7 @@ function resolveTradeMission(state, mission) {
   const shipLabel = ship ? getShipDisplayName(ship) : "Ship";
   pushLog(
     state,
-    `${shipLabel} completed round trip to ${destination ? destination.name : "unknown"} (${outboundCargoName} out, ${returnCargoName} back): ${signClass}${formatCredits(profit)}${financeRepayment > 0 ? ` after repaying ${formatCredits(financeRepayment)}` : ""}.`
+    `${shipLabel} completed round trip to ${destination ? destination.name : "unknown"} (${outboundCargoName} out, ${returnCargoName} back): ${signClass}${formatCredits(profit)}${financeRepayment > 0 ? ` after repaying ${formatCredits(financeRepayment)} (${formatCredits(financeInterest)} interest)` : ""}.`
   );
 }
 
@@ -1597,6 +1837,10 @@ function advanceGameBySeconds(state, elapsedSeconds) {
   if (advanceMarketEvents(state, seconds)) {
     marketChanged = true;
   }
+  if (advanceStructuralEvents(state, seconds)) {
+    marketChanged = true;
+    majorStateChange = true;
+  }
   if (marketChanged) {
     recomputeAllSystemPrices(state);
   }
@@ -1710,6 +1954,7 @@ const dom = {
   hangarContent: document.getElementById("hangarContent"),
   newsfeedContent: document.getElementById("newsfeedContent"),
   eventLog: document.getElementById("eventLog"),
+  economicHistoryContent: document.getElementById("economicHistoryContent"),
   resetBtn: document.getElementById("resetBtn"),
   awayModal: document.getElementById("awayModal"),
   awaySummaryList: document.getElementById("awaySummaryList"),
@@ -1721,6 +1966,7 @@ const dom = {
 
 let gameState = loadGameState() || createNewGameState();
 let tradePlannerState = null;
+let expandedHangarShipIds = new Set();
 const offlineCatchUp = applyOfflineProgress(gameState);
 
 if (offlineCatchUp.elapsedSeconds > 0) {
@@ -2104,7 +2350,7 @@ function renderFleet() {
             Fleet ETA: <strong>${formatSeconds(fastestRemaining)} - ${formatSeconds(slowestRemaining)}</strong><br />
             <div class="progress-track"><div class="progress-fill" style="width:${progress.toFixed(1)}%"></div></div>
             ${shipMarkup}
-            Estimated: <span class="${potential >= 0 ? "pos" : "neg"}">${potential >= 0 ? "+" : ""}${formatCredits(
+            Estimated${financeRepayment > 0 ? " (after interest)" : ""}: <span class="${potential >= 0 ? "pos" : "neg"}">${potential >= 0 ? "+" : ""}${formatCredits(
               potential
             )}</span>
           </article>
@@ -2216,6 +2462,7 @@ function renderHangar() {
       const speedUpgradeDuration = getUpgradeDurationSeconds(ship, "speed");
       const canUpgrade = ship.status === "idle";
       const activeUpgrade = gameState.upgradeMissions.find((u) => u.shipId === ship.id) || null;
+      const isExpanded = expandedHangarShipIds.has(ship.id);
 
       const colorSwatches = SHIP_NAME_COLOR_OPTIONS.map((colorOption) => {
         const active = ship.nameColor === colorOption.value ? "active" : "";
@@ -2240,6 +2487,10 @@ function renderHangar() {
       </div>
       <p class="section-subtitle">Cargo: ${cargoUnits} units (L${ship.cargoLevel}) • Speed: ${(speedMult * 100).toFixed(0)}% travel time (L${ship.speedLevel})</p>
       ${activeUpgrade ? `<p class="section-subtitle">Upgrade in progress: ${activeUpgrade.upgradeType} • ETA ${formatSeconds(activeUpgrade.remainingSeconds)}</p>` : ""}
+      <button class="btn secondary toggle-hangar-details-btn" data-ship-id="${ship.id}" type="button">
+        ${isExpanded ? "Hide Details" : "Customize / Upgrade"}
+      </button>
+      ${isExpanded ? `
       <div class="form-row">
         <label class="section-subtitle" for="ship-name-${ship.id}">Ship Name</label>
         <input id="ship-name-${ship.id}" class="ship-input" type="text" maxlength="${SHIP_NAME_MAX_LENGTH}" value="${escapeHtml(ship.name)}" />
@@ -2255,7 +2506,7 @@ function renderHangar() {
         <button class="btn upgrade-ship-btn" data-ship-id="${ship.id}" data-upgrade-type="speed" ${canUpgrade && gameState.credits >= speedUpgradeCost ? "" : "disabled"} type="button">
           Speed Upgrade (Cost ${formatCredits(speedUpgradeCost)}, ${formatSeconds(speedUpgradeDuration)})
         </button>
-      </div>
+      </div>` : ""}
     </article>
   `;
     })
@@ -2270,23 +2521,37 @@ function renderNewsfeed() {
     return;
   }
 
-  const activeEvents = [...gameState.marketEvents].sort((a, b) => a.remainingSeconds - b.remainingSeconds);
-  if (activeEvents.length === 0) {
+  const activeEvents = [...gameState.marketEvents]
+    .map((event) => ({ ...event, newsType: "temporary", sortTime: Date.now() + event.remainingSeconds * 1000 }))
+    .sort((a, b) => a.remainingSeconds - b.remainingSeconds);
+  const structuralItems = [...(gameState.structuralNews || [])]
+    .map((item) => ({ ...item, newsType: "structural", sortTime: Date.parse(item.timestamp) || 0 }));
+  const combinedItems = [...structuralItems, ...activeEvents]
+    .sort((a, b) => b.sortTime - a.sortTime)
+    .slice(0, 8);
+
+  if (combinedItems.length === 0) {
     dom.newsfeedContent.innerHTML = '<div class="empty">No active market events right now.</div>';
     return;
   }
 
-  dom.newsfeedContent.innerHTML = activeEvents
+  dom.newsfeedContent.innerHTML = combinedItems
     .map((event) => {
       const system = findSystem(gameState, event.systemId);
       const commodity = COMMODITY_INDEX[event.commodityId];
-      const directionLabel = event.direction > 0 ? "Price Spike" : "Price Dip";
+      const directionLabel = event.newsType === "structural"
+        ? event.kind === "global"
+          ? "Permanent Global Shift"
+          : "Permanent Market Shift"
+        : event.direction > 0
+          ? "Price Spike"
+          : "Price Dip";
       return `
       <article class="news-item">
-        <span class="news-kicker">${directionLabel} • ${escapeHtml(system ? system.name : "Unknown System")}</span>
+        <span class="news-kicker">${directionLabel} • ${escapeHtml(system ? system.name : event.kind === "global" ? "Galactic Market" : "Unknown System")}</span>
         <strong>${escapeHtml(event.headline)}</strong>
-        <p class="section-subtitle">${renderCommodityLabel(event.commodityId, system)} • ${escapeHtml(event.body)}</p>
-        <p class="section-subtitle">Expires in ${formatSeconds(event.remainingSeconds)}</p>
+        <p class="section-subtitle">${commodity ? renderCommodityLabel(event.commodityId, system || getHomeSystem(gameState)) : ""} • ${escapeHtml(event.body)}</p>
+        <p class="section-subtitle">${event.newsType === "structural" ? "Permanent change" : `Expires in ${formatSeconds(event.remainingSeconds)}`}</p>
       </article>
     `;
     })
@@ -2316,6 +2581,39 @@ function renderEventLog() {
     .join("");
 }
 
+function renderEconomicHistory() {
+  if (!dom.economicHistoryContent) {
+    return;
+  }
+
+  const historyItems = [...(gameState.structuralNews || [])];
+  if (historyItems.length === 0) {
+    dom.economicHistoryContent.innerHTML = '<div class="empty">No permanent economic shifts recorded yet.</div>';
+    return;
+  }
+
+  dom.economicHistoryContent.innerHTML = historyItems
+    .map((item) => {
+      const system = item.systemId ? findSystem(gameState, item.systemId) : null;
+      const locationLabel = item.kind === "global" ? "Galactic Market" : system ? system.name : "Unknown System";
+      const timestamp = new Date(item.timestamp);
+      return `
+      <article class="news-item">
+        <span class="news-kicker">${item.kind === "global" ? "Global Base Shift" : "Permanent Market Shift"} • ${escapeHtml(locationLabel)}</span>
+        <strong>${escapeHtml(item.headline)}</strong>
+        <p class="section-subtitle">${renderCommodityLabel(item.commodityId, system || getHomeSystem(gameState))} • ${escapeHtml(item.body)}</p>
+        <p class="section-subtitle">${timestamp.toLocaleString([], {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit"
+        })}</p>
+      </article>
+    `;
+    })
+    .join("");
+}
+
 function renderAll() {
   renderHeader();
   renderHomeMarket();
@@ -2325,6 +2623,7 @@ function renderAll() {
   renderHangar();
   renderNewsfeed();
   renderEventLog();
+  renderEconomicHistory();
   if (tradePlannerState) {
     renderTradePlanner();
   }
@@ -2387,6 +2686,21 @@ function onRootClick(event) {
     }
     tradePlannerState.selectedShipIds = Array.from(selectedIds);
     renderTradePlanner();
+    return;
+  }
+
+  const toggleHangarDetailsBtn = rawTarget.closest(".toggle-hangar-details-btn");
+  if (toggleHangarDetailsBtn instanceof HTMLElement) {
+    const shipId = toggleHangarDetailsBtn.dataset.shipId;
+    if (!shipId) {
+      return;
+    }
+    if (expandedHangarShipIds.has(shipId)) {
+      expandedHangarShipIds.delete(shipId);
+    } else {
+      expandedHangarShipIds = new Set([shipId]);
+    }
+    renderHangar();
     return;
   }
 
@@ -2576,6 +2890,7 @@ function resetGame() {
 
   localStorage.removeItem(STORAGE_KEY);
   gameState = createNewGameState();
+  expandedHangarShipIds = new Set();
   closeTradePlanner();
   saveAndRender();
 }
