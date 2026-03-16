@@ -1955,18 +1955,25 @@ const dom = {
   newsfeedContent: document.getElementById("newsfeedContent"),
   eventLog: document.getElementById("eventLog"),
   economicHistoryContent: document.getElementById("economicHistoryContent"),
+  openHelpBtn: document.getElementById("openHelpBtn"),
   resetBtn: document.getElementById("resetBtn"),
   awayModal: document.getElementById("awayModal"),
   awaySummaryList: document.getElementById("awaySummaryList"),
   closeAwayModalBtn: document.getElementById("closeAwayModalBtn"),
   tradeModal: document.getElementById("tradeModal"),
   tradePlannerContent: document.getElementById("tradePlannerContent"),
-  closeTradeModalBtn: document.getElementById("closeTradeModalBtn")
+  closeTradeModalBtn: document.getElementById("closeTradeModalBtn"),
+  systemsModal: document.getElementById("systemsModal"),
+  systemsModalContent: document.getElementById("systemsModalContent"),
+  closeSystemsModalBtn: document.getElementById("closeSystemsModalBtn"),
+  helpModal: document.getElementById("helpModal"),
+  closeHelpModalBtn: document.getElementById("closeHelpModalBtn")
 };
 
 let gameState = loadGameState() || createNewGameState();
 let tradePlannerState = null;
 let expandedHangarShipIds = new Set();
+let systemsModalSort = "profit";
 const offlineCatchUp = applyOfflineProgress(gameState);
 
 if (offlineCatchUp.elapsedSeconds > 0) {
@@ -2015,7 +2022,13 @@ function closeTradePlanner() {
     return;
   }
   dom.tradeModal.classList.add("hidden");
-  document.body.classList.remove("modal-open");
+  if (
+    dom.systemsModal?.classList.contains("hidden") &&
+    dom.awayModal?.classList.contains("hidden") &&
+    dom.helpModal?.classList.contains("hidden")
+  ) {
+    document.body.classList.remove("modal-open");
+  }
   tradePlannerState = null;
 }
 
@@ -2109,34 +2122,166 @@ function renderSystems() {
     return;
   }
 
-  const cards = discovered
-    .map((system) => {
-      const bestOutbound = bestCommodityForSystem(system, home);
-      const bestReturn = bestReturnCommodityForSystem(system, home);
-      const bestOutboundTrip = bestOutbound.margin * gameState.cargoSize;
-      const bestOutboundClass = bestOutboundTrip >= 0 ? "pos" : "neg";
-      const bestReturnTrip = bestReturn.margin * gameState.cargoSize;
-      const bestReturnClass = bestReturnTrip >= 0 ? "pos" : "neg";
-      const totalBestTrip = bestOutboundTrip + bestReturnTrip;
-      const totalBestClass = totalBestTrip >= 0 ? "pos" : "neg";
+  const rankedSystems = getRankedDiscoveredSystems(gameState);
+  const bestProfitSystem = rankedSystems[0] || null;
+  const ratioRankedSystems = rankedSystems.slice().sort(compareSystemsByRatio);
+  const bestRatioSystem =
+    ratioRankedSystems.find((item) => item.system.id !== bestProfitSystem?.system.id) ||
+    ratioRankedSystems[0] ||
+    null;
+  const featuredSystems = [];
+  for (const item of [bestProfitSystem, bestRatioSystem]) {
+    if (item && !featuredSystems.some((entry) => entry.system.id === item.system.id)) {
+      featuredSystems.push(item);
+    }
+  }
 
-      return `
-      <article class="system-simple-card">
-        <div class="system-row">
-          <h3 class="card-title">${system.name}</h3>
-          <span class="badge">${formatDistanceLy(system.distance)}</span>
-        </div>
-        <p class="section-subtitle">Best Out: ${renderCommodityLabel(bestOutbound.commodityId, system)} <span class="${bestOutboundClass}">(${bestOutboundTrip >= 0 ? "+" : ""}${formatCredits(bestOutboundTrip)})</span></p>
-        <p class="section-subtitle">Best Back: ${renderCommodityLabel(bestReturn.commodityId, system)} <span class="${bestReturnClass}">(${bestReturnTrip >= 0 ? "+" : ""}${formatCredits(bestReturnTrip)})</span></p>
-        <div class="system-row">
-          <p class="section-subtitle">Round-Trip ${formatSeconds(getTradeMissionDuration(system.distance))} | <span class="${totalBestClass}">${totalBestTrip >= 0 ? "+" : ""}${formatCredits(totalBestTrip)}</span></p>
-          <button class="btn open-trade-planner-btn" data-system-id="${system.id}" type="button">Plan Trade</button>
-        </div>
-      </article>`;
-    })
+  const cards = featuredSystems
+    .map((item, index) => renderSystemSummaryCard(item, index === 0 ? "Best Profit Route" : "Best Profit / Distance"))
     .join("");
 
-  dom.systemsList.innerHTML = `<div class="systems-simple-grid">${cards}</div>`;
+  dom.systemsList.innerHTML = `
+    <div class="systems-simple-grid">${cards}</div>
+    <button class="btn secondary" id="openSystemsModalBtn" type="button">View All Discovered Systems</button>
+  `;
+}
+
+function getSystemRouteSummary(system, home) {
+  const bestOutbound = bestCommodityForSystem(system, home);
+  const bestReturn = bestReturnCommodityForSystem(system, home);
+  const bestOutboundTrip = bestOutbound.margin * gameState.cargoSize;
+  const bestReturnTrip = bestReturn.margin * gameState.cargoSize;
+  const roundTripProfit = bestOutboundTrip + bestReturnTrip;
+  const profitDistanceRatio = roundTripProfit / Math.max(0.1, system.distance);
+
+  return {
+    system,
+    bestOutbound,
+    bestReturn,
+    bestOutboundTrip,
+    bestReturnTrip,
+    roundTripProfit,
+    profitDistanceRatio
+  };
+}
+
+function compareSystemsByProfit(a, b) {
+  return b.roundTripProfit - a.roundTripProfit || a.system.distance - b.system.distance || a.system.name.localeCompare(b.system.name);
+}
+
+function compareSystemsByRatio(a, b) {
+  return b.profitDistanceRatio - a.profitDistanceRatio || a.system.distance - b.system.distance || b.roundTripProfit - a.roundTripProfit || a.system.name.localeCompare(b.system.name);
+}
+
+function compareSystemsByDistance(a, b) {
+  return a.system.distance - b.system.distance || b.roundTripProfit - a.roundTripProfit || a.system.name.localeCompare(b.system.name);
+}
+
+function getRankedDiscoveredSystems(state) {
+  const home = getHomeSystem(state);
+  return getDiscoveredRemoteSystems(state)
+    .map((system) => getSystemRouteSummary(system, home))
+    .sort(compareSystemsByProfit);
+}
+
+function renderSystemSummaryCard(item, kicker) {
+  const { system, bestOutbound, bestReturn, bestOutboundTrip, bestReturnTrip, roundTripProfit, profitDistanceRatio } = item;
+  const bestOutboundClass = bestOutboundTrip >= 0 ? "pos" : "neg";
+  const bestReturnClass = bestReturnTrip >= 0 ? "pos" : "neg";
+  const totalBestClass = roundTripProfit >= 0 ? "pos" : "neg";
+
+  return `
+    <article class="system-simple-card">
+      <div class="system-row">
+        <h3 class="card-title">${system.name}</h3>
+        <span class="badge">${formatDistanceLy(system.distance)}</span>
+      </div>
+      <p class="section-subtitle">${kicker}</p>
+      <p class="section-subtitle">Best Out: ${renderCommodityLabel(bestOutbound.commodityId, system)} <span class="${bestOutboundClass}">(${bestOutboundTrip >= 0 ? "+" : ""}${formatCredits(bestOutboundTrip)})</span></p>
+      <p class="section-subtitle">Best Back: ${renderCommodityLabel(bestReturn.commodityId, system)} <span class="${bestReturnClass}">(${bestReturnTrip >= 0 ? "+" : ""}${formatCredits(bestReturnTrip)})</span></p>
+      <div class="system-row">
+        <p class="section-subtitle">Round-Trip ${formatSeconds(getTradeMissionDuration(system.distance))} | <span class="${totalBestClass}">${roundTripProfit >= 0 ? "+" : ""}${formatCredits(roundTripProfit)}</span> | Ratio ${profitDistanceRatio.toFixed(1)}</p>
+        <button class="btn open-trade-planner-btn" data-system-id="${system.id}" type="button">Plan Trade</button>
+      </div>
+    </article>`;
+}
+
+function renderSystemsModal() {
+  if (!dom.systemsModalContent) {
+    return;
+  }
+
+  const rankedSystems = getRankedDiscoveredSystems(gameState);
+  if (rankedSystems.length === 0) {
+    dom.systemsModalContent.innerHTML = '<div class="empty">No remote systems discovered yet.</div>';
+    return;
+  }
+
+  const comparators = {
+    distance: compareSystemsByDistance,
+    profit: compareSystemsByProfit,
+    ratio: compareSystemsByRatio
+  };
+  const sortedSystems = rankedSystems.slice().sort(comparators[systemsModalSort] || compareSystemsByProfit);
+  const sortButtons = [
+    ["distance", "Distance"],
+    ["profit", "Profit"],
+    ["ratio", "Profit / Distance Ratio"]
+  ]
+    .map(([value, label]) => `<button type="button" class="btn secondary systems-sort-btn ${systemsModalSort === value ? "active-filter" : ""}" data-sort-value="${value}">${label}</button>`)
+    .join("");
+
+  dom.systemsModalContent.innerHTML = `
+    <div class="sort-row">${sortButtons}</div>
+    <div class="systems-simple-grid">
+      ${sortedSystems.map((item) => renderSystemSummaryCard(item, "Route Overview")).join("")}
+    </div>
+  `;
+}
+
+function openSystemsModal() {
+  if (!dom.systemsModal) {
+    return;
+  }
+  renderSystemsModal();
+  dom.systemsModal.classList.remove("hidden");
+  document.body.classList.add("modal-open");
+}
+
+function closeSystemsModal() {
+  if (!dom.systemsModal) {
+    return;
+  }
+  dom.systemsModal.classList.add("hidden");
+  if (
+    dom.tradeModal?.classList.contains("hidden") &&
+    dom.awayModal?.classList.contains("hidden") &&
+    dom.helpModal?.classList.contains("hidden")
+  ) {
+    document.body.classList.remove("modal-open");
+  }
+}
+
+function openHelpModal() {
+  if (!dom.helpModal) {
+    return;
+  }
+  dom.helpModal.classList.remove("hidden");
+  document.body.classList.add("modal-open");
+}
+
+function closeHelpModal() {
+  if (!dom.helpModal) {
+    return;
+  }
+  dom.helpModal.classList.add("hidden");
+  if (
+    dom.tradeModal?.classList.contains("hidden") &&
+    dom.awayModal?.classList.contains("hidden") &&
+    dom.systemsModal?.classList.contains("hidden")
+  ) {
+    document.body.classList.remove("modal-open");
+  }
 }
 
 function renderTradePlanner() {
@@ -2258,6 +2403,7 @@ function renderTradePlanner() {
       </div>
       <div>
         <p class="section-subtitle">Ships to Send</p>
+        ${idleShips.length > 0 ? `<button type="button" id="selectAllTradeShipsBtn" class="btn secondary">Select All Ships</button>` : ""}
         <div class="ship-select-grid">${shipButtons}</div>
       </div>
       <p class="section-subtitle">Selected Ships: <strong>${selectedShips.length}</strong> / ${idleShips.length}</p>
@@ -2379,15 +2525,18 @@ function renderFleet() {
           .join("");
 
   let scoutPanel = "";
+  const discoveredRemoteCount = Math.max(0, getDiscoveredSystems(gameState).length - 1);
+  const totalRemoteSystems = gameState.systems.filter((system) => system.id !== gameState.homeSystemId).length;
   if (!gameState.scoutShip.owned) {
-    scoutPanel = '<div class="empty">Scout ship not purchased.</div>';
+    scoutPanel = `<div class="empty">Scout ship not purchased.<br />Discovery progress: ${discoveredRemoteCount} / ${totalRemoteSystems} systems.</div>`;
   } else if (gameState.scoutMission) {
     const target = findSystem(gameState, gameState.scoutMission.targetSystemId);
     scoutPanel = `
       <article class="mission-item">
         <strong>Scout Mission Active</strong><br />
         Target region: ${target ? target.name : "Unknown"}<br />
-        ETA: <strong>${formatSeconds(gameState.scoutMission.remainingSeconds)}</strong>
+        ETA: <strong>${formatSeconds(gameState.scoutMission.remainingSeconds)}</strong><br />
+        Discovery progress: ${discoveredRemoteCount} / ${totalRemoteSystems} systems
       </article>
     `;
   } else {
@@ -2397,6 +2546,7 @@ function renderFleet() {
       <article class="mission-item">
         <strong>Scout Ship Idle</strong><br />
         Undiscovered systems: ${remaining}<br />
+        Discovery progress: ${discoveredRemoteCount} / ${totalRemoteSystems} systems<br />
         Next mission duration: ${nextDuration}
       </article>
     `;
@@ -2627,6 +2777,9 @@ function renderAll() {
   if (tradePlannerState) {
     renderTradePlanner();
   }
+  if (dom.systemsModal && !dom.systemsModal.classList.contains("hidden")) {
+    renderSystemsModal();
+  }
 }
 
 function saveAndRender() {
@@ -2647,6 +2800,28 @@ function onRootClick(event) {
       return;
     }
     openTradePlanner(systemId);
+    return;
+  }
+
+  const openHelpBtn = rawTarget.closest("#openHelpBtn");
+  if (openHelpBtn instanceof HTMLElement) {
+    openHelpModal();
+    return;
+  }
+
+  const openSystemsModalBtn = rawTarget.closest("#openSystemsModalBtn");
+  if (openSystemsModalBtn instanceof HTMLElement) {
+    openSystemsModal();
+    return;
+  }
+
+  const systemsSortBtn = rawTarget.closest(".systems-sort-btn");
+  if (systemsSortBtn instanceof HTMLElement) {
+    const sortValue = systemsSortBtn.dataset.sortValue;
+    if (sortValue === "distance" || sortValue === "profit" || sortValue === "ratio") {
+      systemsModalSort = sortValue;
+      renderSystemsModal();
+    }
     return;
   }
 
@@ -2685,6 +2860,16 @@ function onRootClick(event) {
       selectedIds.add(shipId);
     }
     tradePlannerState.selectedShipIds = Array.from(selectedIds);
+    renderTradePlanner();
+    return;
+  }
+
+  const selectAllTradeShipsBtn = rawTarget.closest("#selectAllTradeShipsBtn");
+  if (selectAllTradeShipsBtn instanceof HTMLElement) {
+    if (!tradePlannerState) {
+      return;
+    }
+    tradePlannerState.selectedShipIds = getIdleMerchantShips(gameState).map((ship) => ship.id);
     renderTradePlanner();
     return;
   }
@@ -2776,6 +2961,18 @@ function onRootClick(event) {
   const closeTradeBtn = rawTarget.closest("#closeTradeModalBtn");
   if (closeTradeBtn instanceof HTMLElement) {
     closeTradePlanner();
+    return;
+  }
+
+  const closeSystemsBtn = rawTarget.closest("#closeSystemsModalBtn");
+  if (closeSystemsBtn instanceof HTMLElement) {
+    closeSystemsModal();
+    return;
+  }
+
+  const closeHelpBtn = rawTarget.closest("#closeHelpModalBtn");
+  if (closeHelpBtn instanceof HTMLElement) {
+    closeHelpModal();
     return;
   }
 
@@ -2900,7 +3097,11 @@ function closeAwaySummary() {
     return;
   }
   dom.awayModal.classList.add("hidden");
-  if (dom.tradeModal?.classList.contains("hidden")) {
+  if (
+    dom.tradeModal?.classList.contains("hidden") &&
+    dom.systemsModal?.classList.contains("hidden") &&
+    dom.helpModal?.classList.contains("hidden")
+  ) {
     document.body.classList.remove("modal-open");
   }
 }
@@ -2937,6 +3138,9 @@ document.body.addEventListener("click", onRootClick);
 dom.resetBtn.addEventListener("click", resetGame);
 if (dom.closeAwayModalBtn) {
   dom.closeAwayModalBtn.addEventListener("click", closeAwaySummary);
+}
+if (dom.closeHelpModalBtn) {
+  dom.closeHelpModalBtn.addEventListener("click", closeHelpModal);
 }
 
 registerServiceWorker();

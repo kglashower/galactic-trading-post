@@ -15,6 +15,7 @@
   </head>
   <body>
     <div class="bg-grid" aria-hidden="true"></div>
+    <button id="openHelpBtn" class="help-fab" type="button" aria-haspopup="dialog" aria-controls="helpModal">Help</button>
     <main class="app">
       <header class="panel header-panel">
         <div>
@@ -105,6 +106,57 @@
           <button id="closeTradeModalBtn" class="btn secondary" type="button">Close</button>
         </div>
         <div id="tradePlannerContent"></div>
+      </div>
+    </div>
+
+    <div id="systemsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="systemsModalTitle">
+      <div class="modal-card trade-modal-card">
+        <div class="section-head">
+          <div>
+            <h2 id="systemsModalTitle">All Discovered Systems</h2>
+            <p class="section-subtitle">Compare routes by distance, total profit, or profit efficiency.</p>
+          </div>
+          <button id="closeSystemsModalBtn" class="btn secondary" type="button">Close</button>
+        </div>
+        <div id="systemsModalContent"></div>
+      </div>
+    </div>
+
+    <div id="helpModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+      <div class="modal-card trade-modal-card">
+        <div class="section-head">
+          <div>
+            <h2 id="helpTitle">How To Play</h2>
+            <p class="section-subtitle">A quick guide to trading, scouting, and growing your post.</p>
+          </div>
+          <button id="closeHelpModalBtn" class="btn secondary" type="button">Close</button>
+        </div>
+        <div class="stack">
+          <article class="news-item">
+            <strong>Core Loop</strong>
+            <p class="section-subtitle">Buy cargo at Sol Nexus, send merchant ships to discovered systems, sell outbound cargo there, buy return cargo, then sell it back home for profit.</p>
+          </article>
+          <article class="news-item">
+            <strong>Finding Good Routes</strong>
+            <p class="section-subtitle">Use the Discovered Systems panel for the two best route suggestions, or open the full systems browser to sort by distance, profit, or profit efficiency.</p>
+          </article>
+          <article class="news-item">
+            <strong>Fleet Management</strong>
+            <p class="section-subtitle">Merchant ships can be named, recolored, and upgraded in the Hangar. Cargo upgrades raise carrying capacity. Speed upgrades shorten travel time.</p>
+          </article>
+          <article class="news-item">
+            <strong>Scouting</strong>
+            <p class="section-subtitle">Buy a scout ship in the Shipyard to reveal more systems over time. More discovered systems means more profitable route options.</p>
+          </article>
+          <article class="news-item">
+            <strong>Markets And Events</strong>
+            <p class="section-subtitle">Temporary news events shift local prices for a while. Structural events can permanently change a system’s market class or the galaxy-wide base price of a commodity.</p>
+          </article>
+          <article class="news-item">
+            <strong>Funding Missions</strong>
+            <p class="section-subtitle">If you lack credits for a full route, you can launch a partial load or finance the trip. Financing borrows the shortfall and adds time-based interest.</p>
+          </article>
+        </div>
       </div>
     </div>
 

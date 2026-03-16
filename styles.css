@@ -47,6 +47,26 @@ body.modal-open {
   z-index: 0;
 }
 
+.help-fab {
+  position: fixed;
+  top: 0.9rem;
+  right: 0.9rem;
+  z-index: 15;
+  border: 1px solid rgba(108, 162, 255, 0.55);
+  background: linear-gradient(135deg, rgba(11, 36, 82, 0.95), rgba(15, 84, 128, 0.95));
+  color: var(--text);
+  border-radius: 999px;
+  padding: 0.55rem 0.9rem;
+  font-weight: 700;
+  box-shadow: var(--shadow);
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.help-fab:hover {
+  filter: brightness(1.08);
+}
+
 .app {
   position: relative;
   z-index: 1;
@@ -568,6 +588,18 @@ select {
   font-size: 0.86rem;
 }
 
+.sort-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-bottom: 0.7rem;
+}
+
+.btn.active-filter {
+  border-color: rgba(83, 255, 168, 0.72);
+  box-shadow: 0 0 0 1px rgba(83, 255, 168, 0.55) inset;
+}
+
 .empty {
   color: var(--muted);
   font-size: 0.82rem;
@@ -579,6 +611,11 @@ select {
 @media (min-width: 760px) {
   body {
     padding: 1.3rem;
+  }
+
+  .help-fab {
+    top: 1.2rem;
+    right: 1.2rem;
   }
 
   .header-panel {
