@@ -2006,6 +2006,10 @@ function openTradePlanner(systemId) {
     return;
   }
 
+  if (dom.systemsModal && !dom.systemsModal.classList.contains("hidden")) {
+    dom.systemsModal.classList.add("hidden");
+  }
+
   tradePlannerState = {
     systemId,
     outboundCommodityId: COMMODITIES[0].id,
