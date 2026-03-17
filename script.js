@@ -2680,7 +2680,7 @@ function renderNewsfeed() {
     .sort((a, b) => a.remainingSeconds - b.remainingSeconds);
   const structuralItems = [...(gameState.structuralNews || [])]
     .map((item) => ({ ...item, newsType: "structural", sortTime: Date.parse(item.timestamp) || 0 }));
-  const combinedItems = [...structuralItems, ...activeEvents]
+  const combinedItems = [...structuralItems.slice(0, 1), ...activeEvents]
     .sort((a, b) => b.sortTime - a.sortTime)
     .slice(0, 8);
 
@@ -2766,6 +2766,7 @@ function renderEconomicHistory() {
     `;
     })
     .join("");
+  dom.economicHistoryContent.innerHTML = `<div class="history-list">${dom.economicHistoryContent.innerHTML}</div>`;
 }
 
 function renderAll() {

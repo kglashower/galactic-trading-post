@@ -588,6 +588,13 @@ select {
   font-size: 0.86rem;
 }
 
+.history-list {
+  display: grid;
+  gap: 0.45rem;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
 .sort-row {
   display: flex;
   flex-wrap: wrap;
