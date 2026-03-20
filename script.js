@@ -45,6 +45,11 @@ const BALANCE = {
   CONTRACT_BASE_DURATION_SECONDS: 20 * 60,
   CONTRACT_DISTANCE_DURATION_SECONDS: 5 * 60,
   CONTRACT_UNIT_DURATION_SECONDS: 20,
+  ENVOY_RECRUIT_BASE_COST: 5,
+  ENVOY_RECRUIT_COST_GROWTH: 2,
+  ENVOY_LEVEL_XP_STEP: 25,
+  ENVOY_MAX_BONUS: 0.12,
+  ENVOY_BONUS_PER_LEVEL: 0.015,
   FINANCE_RATE_PER_MINUTE: 0.01,
   FINANCE_MIN_BILLED_MINUTES: 5,
   MARKET_PRESSURE_BUY_STEP: 0.03,
@@ -209,6 +214,34 @@ const CONTRACT_COPY = [
     headline: "Expedited Supply Run",
     body: "Corporate buyers are paying aggressively for a fast, reliable shipment."
   }
+];
+const ENVOY_NAME_PARTS_A = [
+  "Cassian",
+  "Lyra",
+  "Tavian",
+  "Mira",
+  "Orin",
+  "Selka",
+  "Ivo",
+  "Nera",
+  "Dorian",
+  "Vela",
+  "Kestrel",
+  "Soren"
+];
+const ENVOY_NAME_PARTS_B = [
+  "Vale",
+  "Quill",
+  "Morrow",
+  "Drake",
+  "Voss",
+  "Prynn",
+  "Kade",
+  "Rhex",
+  "Solari",
+  "Thorne",
+  "Mercer",
+  "Raine"
 ];
 
 const NAME_PARTS_A = [
@@ -504,6 +537,10 @@ function buildTradeLoadPlan(state, selectedShips, distance, outboundBuyPrice, ou
   };
 }
 
+function findTradeEnvoy(state, envoyId) {
+  return (state.tradeEnvoys || []).find((envoy) => envoy.id === envoyId) || null;
+}
+
 function getCargoUpgradeCost(ship) {
   return clampPositiveInt(
     BALANCE.CARGO_UPGRADE_BASE_COST * Math.pow(BALANCE.CARGO_UPGRADE_COST_GROWTH, ship.cargoLevel)
@@ -570,6 +607,56 @@ function getContractDurationSeconds(distance, targetUnits) {
 
 function getContractBounty(distance, targetUnits) {
   return clampPositiveInt(distance * targetUnits * BALANCE.CONTRACT_BOUNTY_PER_UNIT_DISTANCE);
+}
+
+function getContractReputationReward(distance, targetUnits) {
+  return Math.max(1, Math.round(Math.sqrt(distance * targetUnits) / 2));
+}
+
+function getEnvoyLevel(xp) {
+  return Math.floor(Math.sqrt(Math.max(0, xp) / BALANCE.ENVOY_LEVEL_XP_STEP)) + 1;
+}
+
+function getEnvoyBonusRate(envoy) {
+  return Math.min(BALANCE.ENVOY_MAX_BONUS, getEnvoyLevel(envoy?.xp || 0) * BALANCE.ENVOY_BONUS_PER_LEVEL);
+}
+
+function applyEnvoyPriceModifier(price, envoy, commodityId, mode) {
+  const basePrice = Math.max(1, Math.round(price || 1));
+  if (!envoy || envoy.commodityId !== commodityId) {
+    return basePrice;
+  }
+
+  const bonus = getEnvoyBonusRate(envoy);
+  const multiplier = mode === "sell" ? 1 + bonus : 1 - bonus;
+  return clampPositiveInt(basePrice * multiplier);
+}
+
+function getEnvoyCommodityMissionUnits(envoy, outboundCommodityId, returnCommodityId, outboundUnits, returnUnits) {
+  if (!envoy) {
+    return 0;
+  }
+
+  let total = 0;
+  if (envoy.commodityId === outboundCommodityId) {
+    total += outboundUnits;
+  }
+  if (envoy.commodityId === returnCommodityId) {
+    total += returnUnits;
+  }
+  return total;
+}
+
+function createEnvoyName(sequence) {
+  const first = ENVOY_NAME_PARTS_A[sequence % ENVOY_NAME_PARTS_A.length];
+  const last = ENVOY_NAME_PARTS_B[Math.floor(sequence / ENVOY_NAME_PARTS_A.length) % ENVOY_NAME_PARTS_B.length];
+  return `${first} ${last}`;
+}
+
+function getNextEnvoyRecruitCost(state) {
+  return clampPositiveInt(
+    BALANCE.ENVOY_RECRUIT_BASE_COST * Math.pow(BALANCE.ENVOY_RECRUIT_COST_GROWTH, (state.tradeEnvoys || []).length)
+  );
 }
 
 function getBaseMarketTierIndex(system, commodityId) {
@@ -974,6 +1061,7 @@ function createCorporateContract(state, system, commodityId, sequence) {
   const targetUnits = quantityBase + quantityVariance;
   const durationSeconds = getContractDurationSeconds(system.distance, targetUnits);
   const bounty = getContractBounty(system.distance, targetUnits);
+  const reputationReward = getContractReputationReward(system.distance, targetUnits);
 
   return {
     id: `cc-${sequence}-${system.id}-${commodityId}`,
@@ -987,8 +1075,67 @@ function createCorporateContract(state, system, commodityId, sequence) {
     remainingSeconds: durationSeconds,
     durationSeconds,
     bounty,
+    reputationReward,
     createdAt: nowIso()
   };
+}
+
+function createTradeEnvoyCandidate(state, sequence) {
+  const commodityId = COMMODITIES[sequence % COMMODITIES.length].id;
+  return {
+    id: `tec-${sequence}`,
+    name: createEnvoyName(sequence),
+    commodityId,
+    hireCost: getNextEnvoyRecruitCost(state)
+  };
+}
+
+function fillTradeEnvoyCandidates(state) {
+  if (!Array.isArray(state.tradeEnvoyCandidates)) {
+    state.tradeEnvoyCandidates = [];
+  }
+
+  const usedNames = new Set([
+    ...(state.tradeEnvoyCandidates || []).map((candidate) => candidate.name),
+    ...((state.tradeEnvoys || []).map((envoy) => envoy.name))
+  ]);
+
+  while (state.tradeEnvoyCandidates.length < 3) {
+    const sequence = state.tradeEnvoyCandidateSequence || 0;
+    const candidate = createTradeEnvoyCandidate(state, sequence);
+    state.tradeEnvoyCandidateSequence = sequence + 1;
+    if (usedNames.has(candidate.name)) {
+      continue;
+    }
+    usedNames.add(candidate.name);
+    state.tradeEnvoyCandidates.push(candidate);
+  }
+}
+
+function recruitTradeEnvoy(state, candidateId) {
+  const candidates = Array.isArray(state.tradeEnvoyCandidates) ? state.tradeEnvoyCandidates : [];
+  const candidate = candidates.find((item) => item.id === candidateId);
+  if (!candidate) {
+    return { ok: false, message: "Trade Envoy candidate not found." };
+  }
+  if (state.reputationPoints < candidate.hireCost) {
+    return { ok: false, message: `Need ${candidate.hireCost} reputation.` };
+  }
+
+  state.reputationPoints -= candidate.hireCost;
+  if (!Array.isArray(state.tradeEnvoys)) {
+    state.tradeEnvoys = [];
+  }
+  state.tradeEnvoys.push({
+    id: `te-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+    name: candidate.name,
+    commodityId: candidate.commodityId,
+    xp: 0
+  });
+  state.tradeEnvoyCandidates = candidates.filter((item) => item.id !== candidateId);
+  fillTradeEnvoyCandidates(state);
+  pushLog(state, `Trade Envoy recruited: ${candidate.name}, specialist in ${COMMODITY_INDEX[candidate.commodityId].name}.`);
+  return { ok: true };
 }
 
 function fillCorporateContracts(state) {
@@ -1049,9 +1196,10 @@ function applyCorporateContractDelivery(state, systemId, commodityId, deliveredU
     if (contract.deliveredUnits >= contract.targetUnits) {
       completedContracts.push(contract.id);
       state.credits += contract.bounty;
+      state.reputationPoints += contract.reputationReward || 0;
       pushLog(
         state,
-        `${contract.issuer} paid ${formatCredits(contract.bounty)} for completing ${COMMODITY_INDEX[contract.commodityId].name} delivery to ${findSystem(state, contract.systemId)?.name || "unknown destination"}.`
+        `${contract.issuer} paid ${formatCredits(contract.bounty)} and ${contract.reputationReward || 0} reputation for completing ${COMMODITY_INDEX[contract.commodityId].name} delivery to ${findSystem(state, contract.systemId)?.name || "unknown destination"}.`
       );
     }
   }
@@ -1176,6 +1324,7 @@ function createNewGameState() {
   const state = {
     version: 1,
     credits: BALANCE.STARTING_CREDITS,
+    reputationPoints: 0,
     escrowCredits: 0,
     cargoSize: BALANCE.CARGO_SIZE,
     globalBasePrices: createBasePriceMap(),
@@ -1187,6 +1336,10 @@ function createNewGameState() {
     homeSystemId: "sys-home",
     systems,
     tradeMissions: [],
+    tradeMissionBatches: {},
+    tradeEnvoys: [],
+    tradeEnvoyCandidates: [],
+    tradeEnvoyCandidateSequence: 0,
     upgradeMissions: [],
     marketEvents: [],
     marketEventSequence: 0,
@@ -1212,6 +1365,7 @@ function createNewGameState() {
   applyGlobalBasePrices(state);
   initializeMarketEvents(state);
   fillCorporateContracts(state);
+  fillTradeEnvoyCandidates(state);
   recomputeAllSystemPrices(state);
 
   return state;
@@ -1367,6 +1521,7 @@ function normalizeLoadedState(state) {
   const safe = {
     version: 1,
     credits: normalizedCredits,
+    reputationPoints: Number.isFinite(state.reputationPoints) ? Math.max(0, Math.floor(state.reputationPoints)) : 0,
     escrowCredits: normalizedEscrow,
     cargoSize: Number.isFinite(state.cargoSize) ? state.cargoSize : BALANCE.CARGO_SIZE,
     globalBasePrices:
@@ -1398,6 +1553,29 @@ function normalizeLoadedState(state) {
     homeSystemId,
     systems,
     tradeMissions: normalizedTradeMissions,
+    tradeMissionBatches:
+      state.tradeMissionBatches && typeof state.tradeMissionBatches === "object"
+        ? { ...state.tradeMissionBatches }
+        : {},
+    tradeEnvoys: Array.isArray(state.tradeEnvoys)
+      ? state.tradeEnvoys.map((envoy, index) => ({
+          id: envoy.id || `te-${index}-${Date.now()}`,
+          name: String(envoy.name || createEnvoyName(index)),
+          commodityId: envoy.commodityId || COMMODITIES[index % COMMODITIES.length].id,
+          xp: Number.isFinite(envoy.xp) ? Math.max(0, Math.floor(envoy.xp)) : 0
+        }))
+      : [],
+    tradeEnvoyCandidates: Array.isArray(state.tradeEnvoyCandidates)
+      ? state.tradeEnvoyCandidates.map((candidate, index) => ({
+          id: candidate.id || `tec-${index}-${Date.now()}`,
+          name: String(candidate.name || createEnvoyName(index)),
+          commodityId: candidate.commodityId || COMMODITIES[index % COMMODITIES.length].id,
+          hireCost: Number.isFinite(candidate.hireCost) ? Math.max(1, Math.round(candidate.hireCost)) : getNextEnvoyRecruitCost({ tradeEnvoys: Array.isArray(state.tradeEnvoys) ? state.tradeEnvoys : [] })
+        }))
+      : [],
+    tradeEnvoyCandidateSequence: Number.isFinite(state.tradeEnvoyCandidateSequence)
+      ? Math.max(0, Math.floor(state.tradeEnvoyCandidateSequence))
+      : 0,
     upgradeMissions: Array.isArray(state.upgradeMissions)
       ? state.upgradeMissions.map((u, i) => ({
           id: u.id || `um-${Date.now()}-${i}`,
@@ -1491,6 +1669,28 @@ function normalizeLoadedState(state) {
       : []
   };
 
+  if (!safe.tradeMissionBatches || typeof safe.tradeMissionBatches !== "object") {
+    safe.tradeMissionBatches = {};
+  }
+  for (const mission of safe.tradeMissions) {
+    const batchId = mission.batchId || mission.id;
+    if (!safe.tradeMissionBatches[batchId]) {
+      safe.tradeMissionBatches[batchId] = {
+        batchId,
+        destinationSystemId: mission.destinationSystemId,
+        outboundCommodityId: mission.outboundCommodityId,
+        returnCommodityId: mission.returnCommodityId,
+        totalShips: 0,
+        completedShips: 0,
+        totalProfit: 0,
+        totalFinanceRepayment: 0,
+        totalFinanceInterest: 0,
+        partialReturnShips: 0
+      };
+    }
+    safe.tradeMissionBatches[batchId].totalShips += 1;
+  }
+
   // Repair ship states to match active missions.
   const shipsInMission = new Set(safe.tradeMissions.map((m) => m.shipId));
   const shipsUpgrading = new Set(safe.upgradeMissions.map((u) => u.shipId));
@@ -1510,6 +1710,7 @@ function normalizeLoadedState(state) {
     initializeMarketEvents(safe);
   }
   fillCorporateContracts(safe);
+  fillTradeEnvoyCandidates(safe);
   applyGlobalBasePrices(safe);
   recomputeAllSystemPrices(safe);
 
@@ -1573,6 +1774,7 @@ function launchTradeMission(state, destinationSystemId, outboundCommodityId, ret
   const requestedShipIds = Array.isArray(shipIds) ? shipIds : [];
   const allowPartialLoad = Boolean(options.allowPartialLoad);
   const useFinancing = Boolean(options.useFinancing);
+  const envoy = options.envoyId ? findTradeEnvoy(state, options.envoyId) : null;
 
   if (!destination || destination.id === state.homeSystemId) {
     return { ok: false, message: "Invalid destination." };
@@ -1599,10 +1801,10 @@ function launchTradeMission(state, destinationSystemId, outboundCommodityId, ret
     return { ok: false, message: "One or more selected ships are unavailable." };
   }
 
-  const outboundBuyPrice = home.prices[outboundCommodityId];
-  const outboundSellPrice = destination.prices[outboundCommodityId];
-  const returnBuyPrice = destination.prices[returnCommodityId];
-  const returnSellPrice = home.prices[returnCommodityId];
+  const outboundBuyPrice = applyEnvoyPriceModifier(home.prices[outboundCommodityId], envoy, outboundCommodityId, "buy");
+  const outboundSellPrice = applyEnvoyPriceModifier(destination.prices[outboundCommodityId], envoy, outboundCommodityId, "sell");
+  const returnBuyPrice = applyEnvoyPriceModifier(destination.prices[returnCommodityId], envoy, returnCommodityId, "buy");
+  const returnSellPrice = applyEnvoyPriceModifier(home.prices[returnCommodityId], envoy, returnCommodityId, "sell");
   const loadPlan = buildTradeLoadPlan(
     state,
     selectedShips,
@@ -1634,6 +1836,21 @@ function launchTradeMission(state, destinationSystemId, outboundCommodityId, ret
   const borrowedAmount = useFinancing ? Math.max(0, totalLaunchCost - state.credits) : 0;
   const cashContribution = totalLaunchCost - borrowedAmount;
   const missionBatchId = options.batchId || `batch-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
+  state.tradeMissionBatches[missionBatchId] = {
+    batchId: missionBatchId,
+    destinationSystemId,
+    outboundCommodityId,
+    returnCommodityId,
+    envoyId: envoy?.id || null,
+    totalShips: launchPlans.length,
+    completedShips: 0,
+    totalProfit: 0,
+    totalFinanceRepayment: 0,
+    totalFinanceInterest: 0,
+    partialReturnShips: 0,
+    envoyCommodityUnits: 0
+  };
 
   state.credits -= cashContribution;
   state.escrowCredits += totalEscrow;
@@ -1669,6 +1886,7 @@ function launchTradeMission(state, destinationSystemId, outboundCommodityId, ret
       outboundSellPrice,
       returnBuyPrice,
       returnSellPrice,
+      envoyId: envoy?.id || null,
       estimatedOutboundRevenue,
       estimatedReturnCost,
       estimatedProfit,
@@ -1731,12 +1949,13 @@ function resolveTradeMissionArrival(state, mission) {
 
   const ship = findMerchantShip(state, mission.shipId);
   const destination = findSystem(state, mission.destinationSystemId);
+  const envoy = mission.envoyId ? findTradeEnvoy(state, mission.envoyId) : null;
   if (!destination) {
     mission.arrivalResolved = true;
     return;
   }
 
-  const outboundSellPrice = destination.prices[mission.outboundCommodityId];
+  const outboundSellPrice = applyEnvoyPriceModifier(destination.prices[mission.outboundCommodityId], envoy, mission.outboundCommodityId, "sell");
   const actualOutboundRevenue = outboundSellPrice * mission.units;
   state.credits += actualOutboundRevenue;
   applyMarketTrade(destination, mission.outboundCommodityId, "sell");
@@ -1746,7 +1965,7 @@ function resolveTradeMissionArrival(state, mission) {
   state.credits += escrowReserved;
   state.escrowCredits = Math.max(0, state.escrowCredits - escrowReserved);
 
-  const returnBuyPrice = destination.prices[mission.returnCommodityId];
+  const returnBuyPrice = applyEnvoyPriceModifier(destination.prices[mission.returnCommodityId], envoy, mission.returnCommodityId, "buy");
   const affordableReturnUnits = Math.min(
     mission.units,
     Math.floor(state.credits / Math.max(1, returnBuyPrice))
@@ -1764,18 +1983,10 @@ function resolveTradeMissionArrival(state, mission) {
   mission.outboundSellPrice = outboundSellPrice;
   mission.returnBuyPrice = returnBuyPrice;
 
-  const shipLabel = ship ? getShipDisplayName(ship) : mission.shipId.toUpperCase();
-  if (affordableReturnUnits < mission.units) {
-    pushLog(
-      state,
-      `${shipLabel} reached ${destination.name}. Return cargo loaded partially (${affordableReturnUnits}/${mission.units} units).`
-    );
-  }
-
   recomputeAllSystemPrices(state);
 }
 
-function resolveTradeMission(state, mission) {
+function resolveTradeMission(state, mission, options = {}) {
   const ship = state.merchantShips.find((s) => s.id === mission.shipId);
   if (ship) {
     ship.status = "idle";
@@ -1783,7 +1994,10 @@ function resolveTradeMission(state, mission) {
 
   const home = getHomeSystem(state);
   const destination = findSystem(state, mission.destinationSystemId);
-  const returnSellPrice = home ? home.prices[mission.returnCommodityId] : mission.returnSellPrice;
+  const envoy = mission.envoyId ? findTradeEnvoy(state, mission.envoyId) : null;
+  const returnSellPrice = home
+    ? applyEnvoyPriceModifier(home.prices[mission.returnCommodityId], envoy, mission.returnCommodityId, "sell")
+    : mission.returnSellPrice;
   const outboundRevenue = Number.isFinite(mission.actualOutboundRevenue) ? mission.actualOutboundRevenue : 0;
   const returnUnits = Number.isFinite(mission.returnUnits) ? mission.returnUnits : mission.units;
   const returnRevenue = returnSellPrice * returnUnits;
@@ -1796,6 +2010,7 @@ function resolveTradeMission(state, mission) {
   const financeInterest = Number.isFinite(mission.financeInterest) ? mission.financeInterest : 0;
   const financeRepayment = Number.isFinite(mission.financeRepayment) ? mission.financeRepayment : 0;
   const profit = totalRevenue - totalCost - financeInterest;
+  const partialReturn = returnUnits < mission.units;
 
   state.credits += returnRevenue;
   if (financeRepayment > 0) {
@@ -1813,12 +2028,45 @@ function resolveTradeMission(state, mission) {
     ? COMMODITY_INDEX[mission.returnCommodityId].name
     : mission.returnCommodityId;
 
-  const signClass = profit >= 0 ? "+" : "";
-  const shipLabel = ship ? getShipDisplayName(ship) : "Ship";
-  pushLog(
-    state,
-    `${shipLabel} completed round trip to ${destination ? destination.name : "unknown"} (${outboundCargoName} out, ${returnCargoName} back): ${signClass}${formatCredits(profit)}${financeRepayment > 0 ? ` after repaying ${formatCredits(financeRepayment)} (${formatCredits(financeInterest)} interest)` : ""}.`
-  );
+  const batchId = mission.batchId || mission.id;
+  const batch = state.tradeMissionBatches[batchId];
+  if (batch) {
+    batch.completedShips += 1;
+    batch.totalProfit += profit;
+    batch.totalFinanceRepayment += financeRepayment;
+    batch.totalFinanceInterest += financeInterest;
+    if (partialReturn) {
+      batch.partialReturnShips += 1;
+    }
+    batch.envoyCommodityUnits += getEnvoyCommodityMissionUnits(
+      envoy,
+      mission.outboundCommodityId,
+      mission.returnCommodityId,
+      mission.units,
+      returnUnits
+    );
+  }
+
+  if (!options.suppressLog) {
+    const signClass = profit >= 0 ? "+" : "";
+    const shipLabel = ship ? getShipDisplayName(ship) : "Ship";
+    pushLog(
+      state,
+      `${shipLabel} completed round trip to ${destination ? destination.name : "unknown"} (${outboundCargoName} out, ${returnCargoName} back): ${signClass}${formatCredits(profit)}${financeRepayment > 0 ? ` after repaying ${formatCredits(financeRepayment)} (${formatCredits(financeInterest)} interest)` : ""}.`
+    );
+  }
+
+  return {
+    batchId,
+    profit,
+    financeRepayment,
+    financeInterest,
+    partialReturn,
+    destinationName: destination ? destination.name : "unknown",
+    outboundCargoName,
+    returnCargoName,
+    envoyId: envoy?.id || null
+  };
 }
 
 function updateMerchantShipStyle(state, shipId, name, color) {
@@ -2049,7 +2297,25 @@ function advanceGameBySeconds(state, elapsedSeconds) {
   if (completedTrades.length > 0) {
     state.tradeMissions = state.tradeMissions.filter((m) => m.remainingSeconds > 0);
     for (const mission of completedTrades) {
-      resolveTradeMission(state, mission);
+      const summary = resolveTradeMission(state, mission, { suppressLog: true });
+      const batch = state.tradeMissionBatches[summary.batchId];
+      if (batch && batch.completedShips >= batch.totalShips) {
+        const batchEnvoy = batch.envoyId ? findTradeEnvoy(state, batch.envoyId) : null;
+        let envoySummary = "";
+        if (batchEnvoy && batch.envoyCommodityUnits > 0) {
+          const xpGain = Math.max(1, Math.floor(Math.sqrt(batch.envoyCommodityUnits)));
+          const previousLevel = getEnvoyLevel(batchEnvoy.xp);
+          batchEnvoy.xp += xpGain;
+          const newLevel = getEnvoyLevel(batchEnvoy.xp);
+          envoySummary = ` ${batchEnvoy.name} earned ${xpGain} envoy XP${newLevel > previousLevel ? ` and reached level ${newLevel}` : ""}.`;
+        }
+        const sign = batch.totalProfit >= 0 ? "+" : "";
+        pushLog(
+          state,
+          `Trade mission to ${summary.destinationName} completed (${batch.totalShips} ship${batch.totalShips > 1 ? "s" : ""}, ${summary.outboundCargoName} out, ${summary.returnCargoName} back): ${sign}${formatCredits(batch.totalProfit)}${batch.totalFinanceRepayment > 0 ? ` after repaying ${formatCredits(batch.totalFinanceRepayment)} (${formatCredits(batch.totalFinanceInterest)} interest)` : ""}${batch.partialReturnShips > 0 ? `, ${batch.partialReturnShips} partial return load${batch.partialReturnShips > 1 ? "s" : ""}` : ""}.${envoySummary}`
+        );
+        delete state.tradeMissionBatches[summary.batchId];
+      }
     }
     completedTradeMissions += completedTrades.length;
     majorStateChange = true;
@@ -2137,6 +2403,7 @@ const dom = {
   homeSystemName: document.getElementById("homeSystemName"),
   homeMarket: document.getElementById("homeMarket"),
   contractsContent: document.getElementById("contractsContent"),
+  envoysContent: document.getElementById("envoysContent"),
   systemsList: document.getElementById("systemsList"),
   fleetContent: document.getElementById("fleetContent"),
   shipyardContent: document.getElementById("shipyardContent"),
@@ -2203,7 +2470,8 @@ function openTradePlanner(systemId) {
     systemId,
     outboundCommodityId: COMMODITIES[0].id,
     returnCommodityId: COMMODITIES[1]?.id || COMMODITIES[0].id,
-    selectedShipIds: idleShips.length > 0 ? [idleShips[0].id] : []
+    selectedShipIds: idleShips.length > 0 ? [idleShips[0].id] : [],
+    selectedEnvoyId: null
   };
   renderTradePlanner();
   dom.tradeModal.classList.remove("hidden");
@@ -2273,6 +2541,10 @@ function renderHeader() {
       <span class="stat-label">Scout Ship</span>
       <span class="stat-value">${scoutText}</span>
     </article>
+    <article class="stat-chip">
+      <span class="stat-label">Reputation</span>
+      <span class="stat-value">${gameState.reputationPoints || 0}</span>
+    </article>
   `;
 }
 
@@ -2312,35 +2584,95 @@ function renderCorporateContracts() {
   }
 
   const contracts = Array.isArray(gameState.corporateContracts) ? gameState.corporateContracts : [];
-  if (contracts.length === 0) {
-    dom.contractsContent.innerHTML = '<div class="empty">No active corporate contracts right now.</div>';
+  const contractsMarkup = contracts.length === 0
+    ? '<div class="empty">No active corporate contracts right now.</div>'
+    : contracts
+        .map((contract) => {
+          const system = findSystem(gameState, contract.systemId);
+          const commodity = COMMODITY_INDEX[contract.commodityId];
+          const progress = Math.min(100, (contract.deliveredUnits / Math.max(1, contract.targetUnits)) * 100);
+          const remainingUnits = Math.max(0, contract.targetUnits - contract.deliveredUnits);
+          return `
+          <article class="card">
+            <div class="card-head">
+              <div>
+                <h3 class="card-title">${escapeHtml(contract.issuer)}</h3>
+                <p class="section-subtitle">${escapeHtml(contract.headline)}</p>
+              </div>
+              <span class="badge">${formatCredits(contract.bounty)} • ${contract.reputationReward || 0} rep</span>
+            </div>
+            <p class="section-subtitle">${commodity ? renderCommodityLabel(contract.commodityId, system || getHomeSystem(gameState)) : ""} to <strong>${escapeHtml(system ? system.name : "Unknown System")}</strong></p>
+            <p class="section-subtitle">${escapeHtml(contract.body)}</p>
+            <p class="section-subtitle">Need <strong>${contract.targetUnits}</strong> units • Remaining <strong>${remainingUnits}</strong> • Deadline <strong>${formatSeconds(contract.remainingSeconds)}</strong></p>
+            <div class="progress-track"><div class="progress-fill" style="width:${progress.toFixed(1)}%"></div></div>
+            <p class="section-subtitle">Progress: <strong>${contract.deliveredUnits} / ${contract.targetUnits}</strong> (${progress.toFixed(0)}%)</p>
+          </article>
+        `;
+        })
+        .join("");
+
+  dom.contractsContent.innerHTML = contractsMarkup;
+}
+
+function renderTradeEnvoys() {
+  if (!dom.envoysContent) {
     return;
   }
 
-  dom.contractsContent.innerHTML = contracts
-    .map((contract) => {
-      const system = findSystem(gameState, contract.systemId);
-      const commodity = COMMODITY_INDEX[contract.commodityId];
-      const progress = Math.min(100, (contract.deliveredUnits / Math.max(1, contract.targetUnits)) * 100);
-      const remainingUnits = Math.max(0, contract.targetUnits - contract.deliveredUnits);
-      return `
-      <article class="card">
-        <div class="card-head">
-          <div>
-            <h3 class="card-title">${escapeHtml(contract.issuer)}</h3>
-            <p class="section-subtitle">${escapeHtml(contract.headline)}</p>
-          </div>
-          <span class="badge">${formatCredits(contract.bounty)}</span>
+  const envoyCandidates = Array.isArray(gameState.tradeEnvoyCandidates) ? gameState.tradeEnvoyCandidates : [];
+  const envoys = Array.isArray(gameState.tradeEnvoys) ? gameState.tradeEnvoys : [];
+
+  const recruitMarkup = envoyCandidates.length === 0
+    ? '<div class="empty">No envoy candidates available right now.</div>'
+    : envoyCandidates
+        .map((candidate) => `
+          <article class="card">
+            <div class="card-head">
+              <div>
+                <h3 class="card-title">${escapeHtml(candidate.name)}</h3>
+                <p class="section-subtitle">Trade Envoy Candidate</p>
+              </div>
+              <span class="badge">${candidate.hireCost} rep</span>
+            </div>
+            <p class="section-subtitle">Specialty: ${renderCommodityLabel(candidate.commodityId, getHomeSystem(gameState))}</p>
+            <button class="btn recruit-envoy-btn" data-envoy-candidate-id="${candidate.id}" ${gameState.reputationPoints >= candidate.hireCost ? "" : "disabled"} type="button">
+              ${gameState.reputationPoints >= candidate.hireCost ? "Recruit Envoy" : `Need ${candidate.hireCost} reputation`}
+            </button>
+          </article>
+        `)
+        .join("");
+
+  const rosterMarkup = envoys.length === 0
+    ? '<div class="empty">No Trade Envoys recruited yet. Complete Corporate Contracts to earn reputation.</div>'
+    : envoys
+        .map((envoy) => `
+          <article class="card">
+            <div class="card-head">
+              <div>
+                <h3 class="card-title">${escapeHtml(envoy.name)}</h3>
+                <p class="section-subtitle">Specialist Negotiator</p>
+              </div>
+              <span class="badge">Level ${getEnvoyLevel(envoy.xp)}</span>
+            </div>
+            <p class="section-subtitle">${renderCommodityLabel(envoy.commodityId, getHomeSystem(gameState))}</p>
+            <p class="section-subtitle">XP ${envoy.xp} • ${(getEnvoyBonusRate(envoy) * 100).toFixed(1)}% better pricing on specialty commodity</p>
+          </article>
+        `)
+        .join("");
+
+  dom.envoysContent.innerHTML = `
+    <article class="card">
+      <div class="card-head">
+        <div>
+          <h3 class="card-title">Trade Envoy Bureau</h3>
+          <p class="section-subtitle">Recruit envoys with reputation earned from completed corporate contracts.</p>
         </div>
-        <p class="section-subtitle">${commodity ? renderCommodityLabel(contract.commodityId, system || getHomeSystem(gameState)) : ""} to <strong>${escapeHtml(system ? system.name : "Unknown System")}</strong></p>
-        <p class="section-subtitle">${escapeHtml(contract.body)}</p>
-        <p class="section-subtitle">Need <strong>${contract.targetUnits}</strong> units • Remaining <strong>${remainingUnits}</strong> • Deadline <strong>${formatSeconds(contract.remainingSeconds)}</strong></p>
-        <div class="progress-track"><div class="progress-fill" style="width:${progress.toFixed(1)}%"></div></div>
-        <p class="section-subtitle">Progress: <strong>${contract.deliveredUnits} / ${contract.targetUnits}</strong> (${progress.toFixed(0)}%)</p>
-      </article>
-    `;
-    })
-    .join("");
+        <span class="badge">${gameState.reputationPoints || 0} rep</span>
+      </div>
+      <div class="cards-grid">${recruitMarkup}</div>
+    </article>
+    ${rosterMarkup}
+  `;
 }
 
 function renderSystems() {
@@ -2547,16 +2879,17 @@ function renderTradePlanner() {
 
   const outboundId = tradePlannerState.outboundCommodityId;
   const returnId = tradePlannerState.returnCommodityId;
+  const selectedEnvoy = tradePlannerState.selectedEnvoyId ? findTradeEnvoy(gameState, tradePlannerState.selectedEnvoyId) : null;
   const idleShipIds = new Set(idleShips.map((ship) => ship.id));
   tradePlannerState.selectedShipIds = (tradePlannerState.selectedShipIds || []).filter((shipId) =>
     idleShipIds.has(shipId)
   );
   const selectedShips = idleShips.filter((ship) => tradePlannerState.selectedShipIds.includes(ship.id));
 
-  const outboundBuy = home.prices[outboundId];
-  const outboundSell = system.prices[outboundId];
-  const returnBuy = system.prices[returnId];
-  const returnSell = home.prices[returnId];
+  const outboundBuy = applyEnvoyPriceModifier(home.prices[outboundId], selectedEnvoy, outboundId, "buy");
+  const outboundSell = applyEnvoyPriceModifier(system.prices[outboundId], selectedEnvoy, outboundId, "sell");
+  const returnBuy = applyEnvoyPriceModifier(system.prices[returnId], selectedEnvoy, returnId, "buy");
+  const returnSell = applyEnvoyPriceModifier(home.prices[returnId], selectedEnvoy, returnId, "sell");
   const fullLoadPlan = buildTradeLoadPlan(
     gameState,
     selectedShips,
@@ -2596,6 +2929,20 @@ function renderTradePlanner() {
     : 0;
   const financedProfit = totalProfit - financeInterest;
   const canLaunchFinanced = selectedShips.length > 0 && financeBorrowed > 0 && fullLoadPlan.loadedUnits > 0;
+  const envoyButtons = (gameState.tradeEnvoys || []).length === 0
+    ? '<div class="empty">No Trade Envoys recruited yet. Complete Corporate Contracts to earn reputation and recruit one.</div>'
+    : ['<button type="button" class="ship-select-btn envoy-select-btn ' + (!selectedEnvoy ? 'active' : '') + '" data-envoy-id="">No Envoy</button>']
+        .concat(
+          (gameState.tradeEnvoys || []).map((envoy) => {
+            const active = tradePlannerState.selectedEnvoyId === envoy.id ? "active" : "";
+            const bonus = (getEnvoyBonusRate(envoy) * 100).toFixed(1);
+            return `<button type="button" class="ship-select-btn envoy-select-btn ${active}" data-envoy-id="${envoy.id}">
+              <span class="ship-select-name">${escapeHtml(envoy.name)}</span>
+              <span class="section-subtitle">${renderCommodityLabel(envoy.commodityId, system)} • Level ${getEnvoyLevel(envoy.xp)} • ${bonus}% better pricing</span>
+            </button>`;
+          })
+        )
+        .join("");
 
   const outboundButtons = COMMODITIES.map((commodity) => {
     const active = outboundId === commodity.id ? "active" : "";
@@ -2648,6 +2995,10 @@ function renderTradePlanner() {
         <p class="section-subtitle">Ships to Send</p>
         ${idleShips.length > 0 ? `<button type="button" id="selectAllTradeShipsBtn" class="btn secondary">Select All Ships</button>` : ""}
         <div class="ship-select-grid">${shipButtons}</div>
+      </div>
+      <div>
+        <p class="section-subtitle">Trade Envoy</p>
+        <div class="ship-select-grid">${envoyButtons}</div>
       </div>
       <p class="section-subtitle">Selected Ships: <strong>${selectedShips.length}</strong> / ${idleShips.length}</p>
       <p class="section-subtitle">Selected Cargo: <strong>${fullLoadPlan.totalCapacityUnits} units full</strong>${canLaunchPartial ? ` • partial available <strong>${affordablePlan.loadedUnits} units</strong>` : ""}</p>
@@ -3011,6 +3362,7 @@ function renderEconomicHistory() {
 function renderAll() {
   renderHeader();
   renderCorporateContracts();
+  renderTradeEnvoys();
   renderHomeMarket();
   renderSystems();
   renderFleet();
@@ -3089,6 +3441,16 @@ function onRootClick(event) {
     return;
   }
 
+  const envoySelectBtn = rawTarget.closest(".envoy-select-btn");
+  if (envoySelectBtn instanceof HTMLElement) {
+    if (!tradePlannerState) {
+      return;
+    }
+    tradePlannerState.selectedEnvoyId = envoySelectBtn.dataset.envoyId || null;
+    renderTradePlanner();
+    return;
+  }
+
   const shipSelectBtn = rawTarget.closest(".ship-select-btn");
   if (shipSelectBtn instanceof HTMLElement) {
     if (!tradePlannerState) {
@@ -3146,7 +3508,7 @@ function onRootClick(event) {
       tradePlannerState.outboundCommodityId,
       tradePlannerState.returnCommodityId,
       tradePlannerState.selectedShipIds,
-      { allowPartialLoad: false, useFinancing: false }
+      { allowPartialLoad: false, useFinancing: false, envoyId: tradePlannerState.selectedEnvoyId }
     );
     if (!result.ok) {
       pushLog(gameState, `Trade launch failed: ${result.message}`);
@@ -3169,7 +3531,7 @@ function onRootClick(event) {
       tradePlannerState.outboundCommodityId,
       tradePlannerState.returnCommodityId,
       tradePlannerState.selectedShipIds,
-      { allowPartialLoad: true, useFinancing: false }
+      { allowPartialLoad: true, useFinancing: false, envoyId: tradePlannerState.selectedEnvoyId }
     );
     if (!result.ok) {
       pushLog(gameState, `Trade launch failed: ${result.message}`);
@@ -3192,7 +3554,7 @@ function onRootClick(event) {
       tradePlannerState.outboundCommodityId,
       tradePlannerState.returnCommodityId,
       tradePlannerState.selectedShipIds,
-      { allowPartialLoad: false, useFinancing: true }
+      { allowPartialLoad: false, useFinancing: true, envoyId: tradePlannerState.selectedEnvoyId }
     );
     if (!result.ok) {
       pushLog(gameState, `Trade launch failed: ${result.message}`);
@@ -3206,6 +3568,20 @@ function onRootClick(event) {
   const closeTradeBtn = rawTarget.closest("#closeTradeModalBtn");
   if (closeTradeBtn instanceof HTMLElement) {
     closeTradePlanner();
+    return;
+  }
+
+  const recruitEnvoyBtn = rawTarget.closest(".recruit-envoy-btn");
+  if (recruitEnvoyBtn instanceof HTMLElement) {
+    const candidateId = recruitEnvoyBtn.dataset.envoyCandidateId;
+    if (!candidateId) {
+      return;
+    }
+    const result = recruitTradeEnvoy(gameState, candidateId);
+    if (!result.ok) {
+      pushLog(gameState, `Recruitment failed: ${result.message}`);
+    }
+    saveAndRender();
     return;
   }
 

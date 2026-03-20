@@ -2,7 +2,7 @@
 
 Galactic Trading Post is a mobile-first browser trading and management game built with plain HTML, CSS, and JavaScript.
 
-You run a trading post in the home system `Sol Nexus`, send merchant ships on round-trip trade runs, scout distant systems, customize and upgrade your fleet, react to market events, and fulfill premium `Corporate Contracts`. The game saves locally in `localStorage` and supports offline-capable PWA behavior when served from a real web origin.
+You run a trading post in the home system `Sol Nexus`, send merchant ships on round-trip trade runs, scout distant systems, customize and upgrade your fleet, react to market events, fulfill premium `Corporate Contracts`, and recruit `Trade Envoys` who improve pricing on their specialty commodities. The game saves locally in `localStorage` and supports offline-capable PWA behavior when served from a real web origin.
 
 ## Current Gameplay
 
@@ -17,6 +17,7 @@ You run a trading post in the home system `Sol Nexus`, send merchant ships on ro
 - Scout new systems over time
 - Monitor temporary and permanent market events
 - Complete high-value `Corporate Contracts`
+- Recruit and level `Trade Envoys`
 - Continue progressing while away from the game
 
 ## Core Systems
@@ -121,6 +122,23 @@ If the player lacks enough Credits for a full mission:
   - quantity
 - Rewards are intentionally much more lucrative than normal trade margins
 
+### Trade Envoys
+
+`Trade Envoys` are specialist negotiators unlocked through reputation.
+
+- Completing `Corporate Contracts` awards reputation
+- Reputation is spent to recruit envoys
+- Recruitment offers three generated candidates at a time
+- Recruitment cost scales exponentially as more envoys are hired
+- Each envoy specializes in one commodity
+- An envoy can be assigned to a trade mission during planning
+- If their specialty commodity is used on the mission:
+  - buy prices improve
+  - sell prices improve
+- Envoys earn XP based on:
+  - the square root of the total amount of their specialty commodity carried on the mission
+- Higher envoy levels give stronger pricing bonuses
+
 ### Events
 
 The game has two layers of market events.
@@ -168,11 +186,16 @@ An `Away Summary` modal reports the key results when the player returns.
   - available merchant ships
   - scout status
   - escrow
+  - reputation
 - Newsfeed
   - active temporary market events
   - most recent permanent market shift
 - Corporate Contracts
   - active contract cards with progress
+- Trade Envoys
+  - recruitment candidates
+  - current envoy roster
+  - envoy specialty, level, and pricing bonus
 - Home System Market
   - current home prices for all commodities
 - Discovered Systems
