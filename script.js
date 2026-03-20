@@ -40,6 +40,11 @@ const BALANCE = {
   TRADE_TIME_PER_DISTANCE: 14,
   SCOUT_BASE_MISSION_SECONDS: 20 * 60,
   SCOUT_MISSION_INCREMENT_SECONDS: 5 * 60,
+  CONTRACT_COUNT: 3,
+  CONTRACT_BOUNTY_PER_UNIT_DISTANCE: 8,
+  CONTRACT_BASE_DURATION_SECONDS: 20 * 60,
+  CONTRACT_DISTANCE_DURATION_SECONDS: 5 * 60,
+  CONTRACT_UNIT_DURATION_SECONDS: 20,
   FINANCE_RATE_PER_MINUTE: 0.01,
   FINANCE_MIN_BILLED_MINUTES: 5,
   MARKET_PRESSURE_BUY_STEP: 0.03,
@@ -188,6 +193,23 @@ const STRUCTURAL_EVENT_COPY = {
     ]
   }
 };
+const CONTRACT_COPY = [
+  {
+    issuer: "Orion Procurement",
+    headline: "Emergency Fulfillment",
+    body: "A client needs a guaranteed bulk delivery on a hard deadline."
+  },
+  {
+    issuer: "Helix Logistics",
+    headline: "Priority Requisition",
+    body: "A premium contract is open for a high-volume shipment to a remote buyer."
+  },
+  {
+    issuer: "Cinder Mercantile",
+    headline: "Expedited Supply Run",
+    body: "Corporate buyers are paying aggressively for a fast, reliable shipment."
+  }
+];
 
 const NAME_PARTS_A = [
   "Orion",
@@ -536,6 +558,18 @@ function getStructuralEventIntervalSeconds(sequence) {
   const span = BALANCE.STRUCTURAL_EVENT_MAX_SECONDS - BALANCE.STRUCTURAL_EVENT_MIN_SECONDS;
   const offset = Math.round(span * seededFraction(`structural-event-interval:${sequence}`));
   return BALANCE.STRUCTURAL_EVENT_MIN_SECONDS + offset;
+}
+
+function getContractDurationSeconds(distance, targetUnits) {
+  return Math.round(
+    BALANCE.CONTRACT_BASE_DURATION_SECONDS +
+      distance * BALANCE.CONTRACT_DISTANCE_DURATION_SECONDS +
+      targetUnits * BALANCE.CONTRACT_UNIT_DURATION_SECONDS
+  );
+}
+
+function getContractBounty(distance, targetUnits) {
+  return clampPositiveInt(distance * targetUnits * BALANCE.CONTRACT_BOUNTY_PER_UNIT_DISTANCE);
 }
 
 function getBaseMarketTierIndex(system, commodityId) {
@@ -933,6 +967,135 @@ function advanceStructuralEvents(state, elapsedSeconds) {
   return changed;
 }
 
+function createCorporateContract(state, system, commodityId, sequence) {
+  const copy = CONTRACT_COPY[sequence % CONTRACT_COPY.length];
+  const quantityBase = 60 + Math.round(system.distance * 5);
+  const quantityVariance = Math.round(seededFraction(`contract-qty:${sequence}:${system.id}:${commodityId}`) * 70);
+  const targetUnits = quantityBase + quantityVariance;
+  const durationSeconds = getContractDurationSeconds(system.distance, targetUnits);
+  const bounty = getContractBounty(system.distance, targetUnits);
+
+  return {
+    id: `cc-${sequence}-${system.id}-${commodityId}`,
+    issuer: copy.issuer,
+    headline: copy.headline,
+    body: copy.body,
+    systemId: system.id,
+    commodityId,
+    targetUnits,
+    deliveredUnits: 0,
+    remainingSeconds: durationSeconds,
+    durationSeconds,
+    bounty,
+    createdAt: nowIso()
+  };
+}
+
+function fillCorporateContracts(state) {
+  if (!Array.isArray(state.corporateContracts)) {
+    state.corporateContracts = [];
+  }
+
+  const discoveredSystems = getDiscoveredRemoteSystems(state);
+  const commodityIds = COMMODITIES.map((commodity) => commodity.id);
+
+  while (state.corporateContracts.length < BALANCE.CONTRACT_COUNT && discoveredSystems.length > 0) {
+    const usedKeys = new Set(state.corporateContracts.map((contract) => `${contract.systemId}:${contract.commodityId}`));
+    let created = null;
+
+    for (let attempt = 0; attempt < discoveredSystems.length * commodityIds.length; attempt += 1) {
+      const sequence = state.contractSequence + attempt;
+      const system = discoveredSystems[sequence % discoveredSystems.length];
+      const commodityId = commodityIds[(sequence * 7 + 3) % commodityIds.length];
+      const key = `${system.id}:${commodityId}`;
+      if (usedKeys.has(key)) {
+        continue;
+      }
+      created = createCorporateContract(state, system, commodityId, sequence);
+      state.contractSequence = sequence + 1;
+      break;
+    }
+
+    if (!created) {
+      break;
+    }
+
+    state.corporateContracts.push(created);
+  }
+}
+
+function applyCorporateContractDelivery(state, systemId, commodityId, deliveredUnits) {
+  if (!Array.isArray(state.corporateContracts) || deliveredUnits <= 0) {
+    return false;
+  }
+
+  let changed = false;
+  const completedContracts = [];
+
+  for (const contract of state.corporateContracts) {
+    if (contract.systemId !== systemId || contract.commodityId !== commodityId || contract.remainingSeconds <= 0) {
+      continue;
+    }
+
+    const unitsNeeded = Math.max(0, contract.targetUnits - contract.deliveredUnits);
+    if (unitsNeeded <= 0) {
+      continue;
+    }
+
+    const creditedUnits = Math.min(unitsNeeded, deliveredUnits);
+    contract.deliveredUnits += creditedUnits;
+    changed = true;
+
+    if (contract.deliveredUnits >= contract.targetUnits) {
+      completedContracts.push(contract.id);
+      state.credits += contract.bounty;
+      pushLog(
+        state,
+        `${contract.issuer} paid ${formatCredits(contract.bounty)} for completing ${COMMODITY_INDEX[contract.commodityId].name} delivery to ${findSystem(state, contract.systemId)?.name || "unknown destination"}.`
+      );
+    }
+  }
+
+  if (completedContracts.length > 0) {
+    state.corporateContracts = state.corporateContracts.filter((contract) => !completedContracts.includes(contract.id));
+    fillCorporateContracts(state);
+  }
+
+  return changed;
+}
+
+function advanceCorporateContracts(state, elapsedSeconds) {
+  let changed = false;
+  if (!Array.isArray(state.corporateContracts) || state.corporateContracts.length === 0) {
+    fillCorporateContracts(state);
+    return state.corporateContracts.length > 0;
+  }
+
+  const seconds = Math.max(0, Math.floor(elapsedSeconds || 0));
+  if (seconds <= 0) {
+    return false;
+  }
+
+  for (const contract of state.corporateContracts) {
+    contract.remainingSeconds -= seconds;
+  }
+
+  const expiredContracts = state.corporateContracts.filter((contract) => contract.remainingSeconds <= 0);
+  if (expiredContracts.length > 0) {
+    for (const contract of expiredContracts) {
+      pushLog(
+        state,
+        `${contract.issuer} contract expired for ${COMMODITY_INDEX[contract.commodityId].name} to ${findSystem(state, contract.systemId)?.name || "unknown destination"} (${contract.deliveredUnits}/${contract.targetUnits}).`
+      );
+    }
+    state.corporateContracts = state.corporateContracts.filter((contract) => contract.remainingSeconds > 0);
+    changed = true;
+  }
+
+  fillCorporateContracts(state);
+  return changed;
+}
+
 function createStarSystems() {
   const remoteNames = pickUniqueSystemNames(BALANCE.REMOTE_SYSTEM_COUNT);
   const systems = [];
@@ -1028,6 +1191,8 @@ function createNewGameState() {
     marketEvents: [],
     marketEventSequence: 0,
     secondsUntilNextMarketEvent: BALANCE.MARKET_EVENT_INTERVAL_SECONDS,
+    corporateContracts: [],
+    contractSequence: 0,
     structuralNews: [],
     structuralEventSequence: 0,
     secondsUntilNextStructuralEvent: getStructuralEventIntervalSeconds(0),
@@ -1046,6 +1211,7 @@ function createNewGameState() {
 
   applyGlobalBasePrices(state);
   initializeMarketEvents(state);
+  fillCorporateContracts(state);
   recomputeAllSystemPrices(state);
 
   return state;
@@ -1259,6 +1425,23 @@ function normalizeLoadedState(state) {
     secondsUntilNextMarketEvent: Number.isFinite(state.secondsUntilNextMarketEvent)
       ? Math.max(1, Math.floor(state.secondsUntilNextMarketEvent))
       : BALANCE.MARKET_EVENT_INTERVAL_SECONDS,
+    corporateContracts: Array.isArray(state.corporateContracts)
+      ? state.corporateContracts.map((contract, index) => ({
+          id: contract.id || `cc-${index}-${Date.now()}`,
+          issuer: String(contract.issuer || "Corporate Board"),
+          headline: String(contract.headline || "Priority Delivery"),
+          body: String(contract.body || ""),
+          systemId: contract.systemId,
+          commodityId: contract.commodityId || COMMODITIES[0].id,
+          targetUnits: Number.isFinite(contract.targetUnits) ? Math.max(1, Math.floor(contract.targetUnits)) : 1,
+          deliveredUnits: Number.isFinite(contract.deliveredUnits) ? Math.max(0, Math.floor(contract.deliveredUnits)) : 0,
+          remainingSeconds: Number.isFinite(contract.remainingSeconds) ? Math.max(0, Math.floor(contract.remainingSeconds)) : 1,
+          durationSeconds: Number.isFinite(contract.durationSeconds) ? Math.max(1, Math.floor(contract.durationSeconds)) : 1,
+          bounty: Number.isFinite(contract.bounty) ? Math.max(1, Math.round(contract.bounty)) : 1,
+          createdAt: contract.createdAt || nowIso()
+        }))
+      : [],
+    contractSequence: Number.isFinite(state.contractSequence) ? Math.max(0, Math.floor(state.contractSequence)) : 0,
     structuralNews: Array.isArray(state.structuralNews)
       ? state.structuralNews
           .map((item, index) => ({
@@ -1326,6 +1509,7 @@ function normalizeLoadedState(state) {
   if (safe.marketEvents.length === 0) {
     initializeMarketEvents(safe);
   }
+  fillCorporateContracts(safe);
   applyGlobalBasePrices(safe);
   recomputeAllSystemPrices(safe);
 
@@ -1556,6 +1740,7 @@ function resolveTradeMissionArrival(state, mission) {
   const actualOutboundRevenue = outboundSellPrice * mission.units;
   state.credits += actualOutboundRevenue;
   applyMarketTrade(destination, mission.outboundCommodityId, "sell");
+  applyCorporateContractDelivery(state, destination.id, mission.outboundCommodityId, mission.units);
 
   const escrowReserved = Number.isFinite(mission.escrowReserved) ? mission.escrowReserved : 0;
   state.credits += escrowReserved;
@@ -1841,6 +2026,9 @@ function advanceGameBySeconds(state, elapsedSeconds) {
     marketChanged = true;
     majorStateChange = true;
   }
+  if (advanceCorporateContracts(state, seconds)) {
+    majorStateChange = true;
+  }
   if (marketChanged) {
     recomputeAllSystemPrices(state);
   }
@@ -1948,6 +2136,7 @@ const dom = {
   headerStats: document.getElementById("headerStats"),
   homeSystemName: document.getElementById("homeSystemName"),
   homeMarket: document.getElementById("homeMarket"),
+  contractsContent: document.getElementById("contractsContent"),
   systemsList: document.getElementById("systemsList"),
   fleetContent: document.getElementById("fleetContent"),
   shipyardContent: document.getElementById("shipyardContent"),
@@ -2117,6 +2306,43 @@ function renderHomeMarket() {
   `;
 }
 
+function renderCorporateContracts() {
+  if (!dom.contractsContent) {
+    return;
+  }
+
+  const contracts = Array.isArray(gameState.corporateContracts) ? gameState.corporateContracts : [];
+  if (contracts.length === 0) {
+    dom.contractsContent.innerHTML = '<div class="empty">No active corporate contracts right now.</div>';
+    return;
+  }
+
+  dom.contractsContent.innerHTML = contracts
+    .map((contract) => {
+      const system = findSystem(gameState, contract.systemId);
+      const commodity = COMMODITY_INDEX[contract.commodityId];
+      const progress = Math.min(100, (contract.deliveredUnits / Math.max(1, contract.targetUnits)) * 100);
+      const remainingUnits = Math.max(0, contract.targetUnits - contract.deliveredUnits);
+      return `
+      <article class="card">
+        <div class="card-head">
+          <div>
+            <h3 class="card-title">${escapeHtml(contract.issuer)}</h3>
+            <p class="section-subtitle">${escapeHtml(contract.headline)}</p>
+          </div>
+          <span class="badge">${formatCredits(contract.bounty)}</span>
+        </div>
+        <p class="section-subtitle">${commodity ? renderCommodityLabel(contract.commodityId, system || getHomeSystem(gameState)) : ""} to <strong>${escapeHtml(system ? system.name : "Unknown System")}</strong></p>
+        <p class="section-subtitle">${escapeHtml(contract.body)}</p>
+        <p class="section-subtitle">Need <strong>${contract.targetUnits}</strong> units • Remaining <strong>${remainingUnits}</strong> • Deadline <strong>${formatSeconds(contract.remainingSeconds)}</strong></p>
+        <div class="progress-track"><div class="progress-fill" style="width:${progress.toFixed(1)}%"></div></div>
+        <p class="section-subtitle">Progress: <strong>${contract.deliveredUnits} / ${contract.targetUnits}</strong> (${progress.toFixed(0)}%)</p>
+      </article>
+    `;
+    })
+    .join("");
+}
+
 function renderSystems() {
   const discovered = getDiscoveredRemoteSystems(gameState);
   const home = getHomeSystem(gameState);
@@ -2188,11 +2414,23 @@ function getRankedDiscoveredSystems(state) {
     .sort(compareSystemsByProfit);
 }
 
-function renderSystemSummaryCard(item, kicker) {
+function renderSystemSummaryCard(item, kicker, options = {}) {
   const { system, bestOutbound, bestReturn, bestOutboundTrip, bestReturnTrip, roundTripProfit, profitDistanceRatio } = item;
   const bestOutboundClass = bestOutboundTrip >= 0 ? "pos" : "neg";
   const bestReturnClass = bestReturnTrip >= 0 ? "pos" : "neg";
   const totalBestClass = roundTripProfit >= 0 ? "pos" : "neg";
+  const matchingContracts = options.includeContracts
+    ? (gameState.corporateContracts || []).filter((contract) => contract.systemId === system.id)
+    : [];
+  const contractMarkup = matchingContracts.length > 0
+    ? `<div class="stack">${matchingContracts
+        .map((contract) => {
+          const commodity = COMMODITY_INDEX[contract.commodityId];
+          const remainingUnits = Math.max(0, contract.targetUnits - contract.deliveredUnits);
+          return `<p class="section-subtitle"><strong>Contract:</strong> ${commodity ? renderCommodityLabel(contract.commodityId, system) : ""} • ${remainingUnits}/${contract.targetUnits} units left • ${formatCredits(contract.bounty)}</p>`;
+        })
+        .join("")}</div>`
+    : "";
 
   return `
     <article class="system-simple-card">
@@ -2201,6 +2439,7 @@ function renderSystemSummaryCard(item, kicker) {
         <span class="badge">${formatDistanceLy(system.distance)}</span>
       </div>
       <p class="section-subtitle">${kicker}</p>
+      ${contractMarkup}
       <p class="section-subtitle">Best Out: ${renderCommodityLabel(bestOutbound.commodityId, system)} <span class="${bestOutboundClass}">(${bestOutboundTrip >= 0 ? "+" : ""}${formatCredits(bestOutboundTrip)})</span></p>
       <p class="section-subtitle">Best Back: ${renderCommodityLabel(bestReturn.commodityId, system)} <span class="${bestReturnClass}">(${bestReturnTrip >= 0 ? "+" : ""}${formatCredits(bestReturnTrip)})</span></p>
       <div class="system-row">
@@ -2238,7 +2477,7 @@ function renderSystemsModal() {
   dom.systemsModalContent.innerHTML = `
     <div class="sort-row">${sortButtons}</div>
     <div class="systems-simple-grid">
-      ${sortedSystems.map((item) => renderSystemSummaryCard(item, "Route Overview")).join("")}
+      ${sortedSystems.map((item) => renderSystemSummaryCard(item, "Route Overview", { includeContracts: true })).join("")}
     </div>
   `;
 }
@@ -2771,6 +3010,7 @@ function renderEconomicHistory() {
 
 function renderAll() {
   renderHeader();
+  renderCorporateContracts();
   renderHomeMarket();
   renderSystems();
   renderFleet();
@@ -3173,6 +3413,7 @@ setInterval(() => {
       renderHeader();
     }
     if (tickResult.timersAdvanced) {
+      renderCorporateContracts();
       renderFleet();
       renderNewsfeed();
     }
