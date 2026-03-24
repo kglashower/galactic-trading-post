@@ -313,6 +313,13 @@ function formatDistanceLy(distance) {
   return `${Number(distance).toFixed(1)} LY`;
 }
 
+function getPercent(part, total) {
+  if (!Number.isFinite(part) || !Number.isFinite(total) || total <= 0) {
+    return 0;
+  }
+  return clamp((part / total) * 100, 0, 100);
+}
+
 function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -374,6 +381,18 @@ function getTradeEnvoyLevel(xp) {
 
 function getTradeEnvoyBonusRate(envoy) {
   return Math.min(BALANCE.ENVOY_MAX_BONUS, getTradeEnvoyLevel(envoy?.xp || 0) * BALANCE.ENVOY_BONUS_PER_LEVEL);
+}
+
+function getTradeEnvoyLevelProgress(envoy) {
+  const level = getTradeEnvoyLevel(envoy?.xp || 0);
+  const current = Math.pow(level - 1, 2) * BALANCE.ENVOY_LEVEL_XP_STEP;
+  const next = Math.pow(level, 2) * BALANCE.ENVOY_LEVEL_XP_STEP;
+  return {
+    level,
+    current,
+    next,
+    pct: getPercent((envoy?.xp || 0) - current, next - current)
+  };
 }
 
 function getMerchantShipCostForCount(existingShips) {
@@ -2036,6 +2055,7 @@ function renderHeader() {
       <span class="stat-label">Merchant Ships</span>
       <span class="stat-value">${idleShips} idle / ${totalShips} owned</span>
       <div class="section-subtitle">Cap ${gameState.maxMerchantShips}</div>
+      <div class="progress-line"><div class="progress-fill" style="width:${getPercent(totalShips, gameState.maxMerchantShips)}%"></div></div>
     </article>
     <article class="stat-chip">
       <span class="stat-label">Scout Ship</span>
@@ -2045,6 +2065,7 @@ function renderHeader() {
       <span class="stat-label">Charts</span>
       <span class="stat-value">${discovered} / ${totalDiscoverable}</span>
       <div class="section-subtitle">Discovered systems</div>
+      <div class="progress-line"><div class="progress-fill" style="width:${getPercent(discovered, totalDiscoverable)}%"></div></div>
     </article>
   `;
 }
@@ -2154,6 +2175,7 @@ function renderRouteCard(route, kicker) {
   const tripTime = formatSeconds(Math.round(system.distance * BALANCE.TRADE_TIME_PER_DISTANCE * 2));
   const bestOutProfit = route.bestOutbound.margin * BALANCE.BASE_CARGO_SIZE;
   const bestBackProfit = route.bestReturn.margin * BALANCE.BASE_CARGO_SIZE;
+  const efficiencyPct = clamp(route.profitPerDistance * 8, 8, 100);
   const matchingContracts = gameState.contracts.filter((contract) => contract.systemId === system.id);
   return `
     <article class="card">
@@ -2167,6 +2189,7 @@ function renderRouteCard(route, kicker) {
       <p class="metric-line">Best outbound: ${renderCommodityLabel(route.bestOutbound.commodityId, system)} <span class="${bestOutProfit >= 0 ? "pos" : "neg"}">${bestOutProfit >= 0 ? "+" : ""}${formatCredits(bestOutProfit)}</span></p>
       <p class="metric-line">Best return: ${renderCommodityLabel(route.bestReturn.commodityId, system)} <span class="${bestBackProfit >= 0 ? "pos" : "neg"}">${bestBackProfit >= 0 ? "+" : ""}${formatCredits(bestBackProfit)}</span></p>
       <p class="metric-line">Round trip: <strong>${route.roundTripProfit >= 0 ? "+" : ""}${formatCredits(route.roundTripProfit)}</strong> • ${tripTime}</p>
+      <div class="progress-line"><div class="progress-fill" style="width:${efficiencyPct}%"></div></div>
       ${matchingContracts.length > 0 ? matchingContracts.map((contract) => `<p class="metric-line"><strong>Contract:</strong> ${renderCommodityLabel(contract.commodityId, system)} • ${Math.max(0, contract.targetUnits - contract.deliveredUnits)}/${contract.targetUnits} units • ${formatCredits(contract.bounty)}</p>`).join("") : ""}
       <div class="inline-actions">
         <button class="btn plan-trade-btn" data-system-id="${system.id}" type="button">Plan Trade</button>
@@ -2211,6 +2234,10 @@ function renderNavigationSection() {
       return a.system.distance - b.system.distance;
     });
   const totalDiscovered = getDiscoveredRemoteSystems(gameState).length;
+  const scoutProgressPct = getPercent(totalDiscovered, BALANCE.REMOTE_SYSTEM_COUNT);
+  const scoutMissionPct = gameState.scoutMission
+    ? getPercent((gameState.scoutMission.durationSeconds || 0) - (gameState.scoutMission.remainingSeconds || 0), gameState.scoutMission.durationSeconds || 1)
+    : 0;
   return `
     <section class="section-modal-body">
       <article class="card">
@@ -2222,6 +2249,8 @@ function renderNavigationSection() {
           <button class="btn" data-action="launch-scout" type="button" ${!gameState.scoutShip.owned || gameState.scoutShip.status !== "idle" || getUndiscoveredSystems(gameState).length === 0 ? "disabled" : ""}>${!gameState.scoutShip.owned ? `Buy scout in Shipyard` : getUndiscoveredSystems(gameState).length === 0 ? "All Systems Mapped" : "Launch Scout Mission"}</button>
         </div>
         <p class="metric-line">Scout ship: <strong>${!gameState.scoutShip.owned ? "Not owned" : gameState.scoutShip.status === "mission" ? `On mission • ${formatSeconds(gameState.scoutMission?.remainingSeconds || 0)} remaining` : "Idle"}</strong></p>
+        <div class="progress-line"><div class="progress-fill" style="width:${scoutProgressPct}%"></div></div>
+        ${gameState.scoutMission ? `<div class="progress-line"><div class="progress-fill warn" style="width:${scoutMissionPct}%"></div></div>` : ""}
         ${gameState.scoutShip.owned ? `<p class="metric-line">Next mission duration: ${formatSeconds(getScoutMissionDuration(gameState))}</p>` : ""}
       </article>
       <article class="card">
@@ -2260,6 +2289,7 @@ function renderFleetMissionCard(batch) {
     return acc;
   }, {}));
   const envoy = batch.envoyId ? findTradeEnvoy(gameState, batch.envoyId) : null;
+  const missionPct = getPercent((batch.durationSeconds || 0) - returnEta, batch.durationSeconds || 1);
   return `
     <article class="mission-item">
       <div class="card-head">
@@ -2270,6 +2300,7 @@ function renderFleetMissionCard(batch) {
         <span class="badge">${batch.totalShips} ships</span>
       </div>
       <p class="mission-meta">Outbound ETA: ${formatSeconds(outboundEta)} • Return ETA: ${formatSeconds(returnEta)}</p>
+      <div class="progress-line"><div class="progress-fill" style="width:${missionPct}%"></div></div>
       <p class="mission-meta">Estimated ${batch.financed ? "(after interest)" : ""}: <span class="${batch.estimatedProfitAfterInterest >= 0 ? "pos" : "neg"}">${batch.estimatedProfitAfterInterest >= 0 ? "+" : ""}${formatCredits(batch.estimatedProfitAfterInterest)}</span></p>
       ${envoy ? `<p class="mission-meta">Envoy: ${escapeHtml(envoy.name)} • ${escapeHtml(getEnvoySpecialtyLabel(envoy))}</p>` : ""}
       ${groupedBySpeed.map((group) => `<div class="notice-box"><p class="mission-meta"><strong>Speed Group</strong> • ${formatSeconds(group[0].durationSeconds)} total</p><p class="mission-meta">${group.map((mission) => {
@@ -2310,7 +2341,8 @@ function renderFleetSection() {
         <div class="cards-grid">
           ${gameState.upgradeMissions.length > 0 ? gameState.upgradeMissions.map((mission) => {
             const ship = findMerchantShip(gameState, mission.shipId);
-            return `<article class="mission-item"><h3>${escapeHtml(getShipDisplayName(ship))}</h3><p class="mission-meta">${mission.upgradeType} refit • ${formatSeconds(mission.remainingSeconds)} remaining</p></article>`;
+            const progressPct = getPercent((mission.durationSeconds || 0) - (mission.remainingSeconds || 0), mission.durationSeconds || 1);
+            return `<article class="mission-item"><h3>${escapeHtml(getShipDisplayName(ship))}</h3><p class="mission-meta">${mission.upgradeType} refit • ${formatSeconds(mission.remainingSeconds)} remaining</p><div class="progress-line"><div class="progress-fill warn" style="width:${progressPct}%"></div></div></article>`;
           }).join("") : '<div class="empty">No ships are currently in refit.</div>'}
         </div>
       </article>
@@ -2320,6 +2352,7 @@ function renderFleetSection() {
 
 function renderShipyardSection() {
   const nextShipCost = getMerchantShipCostForCount(gameState.merchantShips.length);
+  const shipCapPct = getPercent(gameState.merchantShips.length, gameState.maxMerchantShips);
   return `
     <section class="section-modal-body split-grid">
       <article class="card">
@@ -2331,6 +2364,7 @@ function renderShipyardSection() {
           <button class="btn" data-action="buy-merchant-ship" type="button" ${gameState.credits < nextShipCost || gameState.merchantShips.length >= gameState.maxMerchantShips ? "disabled" : ""}>Buy Ship (${formatCredits(nextShipCost)})</button>
         </div>
         <p class="metric-line">Owned ships: ${gameState.merchantShips.length} / ${gameState.maxMerchantShips}</p>
+        <div class="progress-line"><div class="progress-fill" style="width:${shipCapPct}%"></div></div>
         <p class="metric-line">Next cap increase: every non-third level grants +1 max merchant ship.</p>
       </article>
       <article class="card">
@@ -2358,6 +2392,8 @@ function renderHangarSection() {
         ${gameState.merchantShips.map((ship) => {
           const isOpen = hangarExpandedShipId === ship.id;
           const draft = getHangarDraft(ship);
+          const activeUpgrade = gameState.upgradeMissions.find((mission) => mission.shipId === ship.id) || null;
+          const upgradePct = activeUpgrade ? getPercent((activeUpgrade.durationSeconds || 0) - (activeUpgrade.remainingSeconds || 0), activeUpgrade.durationSeconds || 1) : 0;
           return `
             <article class="ship-card">
               <div class="ship-row">
@@ -2367,6 +2403,7 @@ function renderHangarSection() {
                 </div>
                 <button class="btn secondary toggle-hangar-btn" data-ship-id="${ship.id}" type="button">${isOpen ? "Hide Details" : "Customize / Upgrade"}</button>
               </div>
+              ${activeUpgrade ? `<div class="progress-line"><div class="progress-fill warn" style="width:${upgradePct}%"></div></div><p class="metric-line">${escapeHtml(activeUpgrade.upgradeType)} refit • ${formatSeconds(activeUpgrade.remainingSeconds)} remaining</p>` : ""}
               ${isOpen ? `
                 <div class="form-grid">
                   <div class="field">
@@ -2449,7 +2486,9 @@ function renderEnvoysSection() {
         </div>
       </article>
       <div class="cards-grid">
-        ${gameState.tradeEnvoys.length > 0 ? gameState.tradeEnvoys.map((envoy) => `
+        ${gameState.tradeEnvoys.length > 0 ? gameState.tradeEnvoys.map((envoy) => {
+          const levelProgress = getTradeEnvoyLevelProgress(envoy);
+          return `
           <article class="envoy-card">
             <div class="card-head">
               <div>
@@ -2460,8 +2499,10 @@ function renderEnvoysSection() {
             </div>
             <p class="envoy-meta">Bonus: ${(getTradeEnvoyBonusRate(envoy) * 100).toFixed(1)}% better pricing</p>
             <p class="envoy-meta">XP: ${envoy.xp} • Status: ${envoy.status === "idle" ? "Idle" : `On mission to ${findSystem(gameState, gameState.tradeMissionBatches[envoy.assignedBatchId]?.destinationSystemId)?.name || "route"}`}</p>
+            <div class="progress-line"><div class="progress-fill" style="width:${levelProgress.pct}%"></div></div>
           </article>
-        `).join("") : '<div class="empty">No envoys on the roster yet. Reach level 3 for your first envoy.</div>'}
+        `;
+        }).join("") : '<div class="empty">No envoys on the roster yet. Reach level 3 for your first envoy.</div>'}
       </div>
     </section>
   `;
@@ -2558,6 +2599,8 @@ function renderAnalyticsSection() {
   }, {}))
     .sort((a, b) => b.ratio - a.ratio)
     .slice(0, 5);
+  const maxProfitRoute = Math.max(1, ...topProfitRoutes.map((item) => item.profit));
+  const maxRatioRoute = Math.max(1, ...topRatioRoutes.map((item) => item.ratio));
   return `
     <section class="section-modal-body">
       <div class="analytics-grid">
@@ -2579,11 +2622,11 @@ function renderAnalyticsSection() {
       <div class="split-grid">
         <article class="card">
           <div class="section-head"><div><h3>Top Profit Routes</h3></div></div>
-          ${topProfitRoutes.length > 0 ? topProfitRoutes.map((item) => `<p class="analytics-line"><strong>${escapeHtml(findSystem(gameState, item.systemId)?.name || "Unknown")}</strong> • ${formatCredits(item.profit)} • ${item.trips} trips</p>`).join("") : '<div class="empty">No trade history yet.</div>'}
+          ${topProfitRoutes.length > 0 ? topProfitRoutes.map((item) => `<div><p class="analytics-line"><strong>${escapeHtml(findSystem(gameState, item.systemId)?.name || "Unknown")}</strong> • ${formatCredits(item.profit)} • ${item.trips} trips</p><div class="progress-line"><div class="progress-fill" style="width:${getPercent(item.profit, maxProfitRoute)}%"></div></div></div>`).join("") : '<div class="empty">No trade history yet.</div>'}
         </article>
         <article class="card">
           <div class="section-head"><div><h3>Best Profit / Distance</h3></div></div>
-          ${topRatioRoutes.length > 0 ? topRatioRoutes.map((item) => `<p class="analytics-line"><strong>${escapeHtml(findSystem(gameState, item.systemId)?.name || "Unknown")}</strong> • ${formatCredits(item.ratio)} per LY • ${item.trips} trips</p>`).join("") : '<div class="empty">No trade history yet.</div>'}
+          ${topRatioRoutes.length > 0 ? topRatioRoutes.map((item) => `<div><p class="analytics-line"><strong>${escapeHtml(findSystem(gameState, item.systemId)?.name || "Unknown")}</strong> • ${formatCredits(item.ratio)} per LY • ${item.trips} trips</p><div class="progress-line"><div class="progress-fill" style="width:${getPercent(item.ratio, maxRatioRoute)}%"></div></div></div>`).join("") : '<div class="empty">No trade history yet.</div>'}
         </article>
       </div>
     </section>
@@ -2599,6 +2642,7 @@ function renderNewsSection() {
         <div class="cards-grid">
           ${gameState.marketEvents.map((event) => {
             const system = findSystem(gameState, event.systemId);
+            const eventPct = getPercent((BALANCE.MARKET_EVENT_DURATION_SECONDS - event.remainingSeconds), BALANCE.MARKET_EVENT_DURATION_SECONDS);
             return `
               <article class="news-item">
                 <div class="card-head">
@@ -2610,6 +2654,7 @@ function renderNewsSection() {
                 </div>
                 <p class="section-subtitle">${renderCommodityLabel(event.commodityId, system || getHomeSystem(gameState))}</p>
                 <p class="section-subtitle">${escapeHtml(event.body)}</p>
+                <div class="progress-line"><div class="progress-fill warn" style="width:${eventPct}%"></div></div>
               </article>
             `;
           }).join("")}
@@ -2716,6 +2761,9 @@ function renderTradePlanner() {
   const partialPlan = system ? createTradeLoadPlan(gameState, selectedShips, system, tradePlannerState.outboundCommodityId, tradePlannerState.returnCommodityId, envoy, gameState.credits, true) : null;
   const borrowedAmount = fullPlan ? Math.max(0, fullPlan.totalUpfrontCost - gameState.credits) : 0;
   const estimatedInterest = fullPlan ? fullPlan.plans.reduce((sum, plan) => sum + getMissionFinanceInterest(Math.round((borrowedAmount * plan.upfrontCost) / Math.max(1, fullPlan.totalUpfrontCost)), plan.durationSeconds), 0) : 0;
+  const loadPct = fullPlan ? getPercent(fullPlan.loadedUnits, fullPlan.totalCapacity || 1) : 0;
+  const partialPct = partialPlan ? getPercent(partialPlan.loadedUnits, partialPlan.totalCapacity || 1) : 0;
+  const fundingPct = fullPlan ? getPercent(Math.min(gameState.credits, fullPlan.totalUpfrontCost), fullPlan.totalUpfrontCost || 1) : 0;
   const idleEnvoys = getIdleTradeEnvoys(gameState);
   dom.tradePlannerContent.innerHTML = !system ? '<div class="empty">Trade planner unavailable.</div>' : `
     <article class="card">
@@ -2760,12 +2808,15 @@ function renderTradePlanner() {
             <h3>Mission Cost</h3>
             <p class="metric-line">Selected ships: ${selectedShips.length}</p>
             <p class="metric-line">Loaded units: ${fullPlan?.loadedUnits || 0} / ${fullPlan?.totalCapacity || 0}</p>
+            <div class="progress-line"><div class="progress-fill" style="width:${loadPct}%"></div></div>
             <p class="metric-line">Full mission cost: ${formatCredits(fullPlan?.totalUpfrontCost || 0)}</p>
+            <div class="progress-line"><div class="progress-fill ${borrowedAmount > 0 ? "warn" : ""}" style="width:${fundingPct}%"></div></div>
             <p class="metric-line">Estimated outbound sale revenue: ${formatCredits(fullPlan?.totalEstimatedOutboundRevenue || 0)}</p>
             <p class="metric-line">Estimated return cost: ${formatCredits(fullPlan?.totalEstimatedReturnCost || 0)}</p>
             <p class="metric-line">Finance shortfall: ${borrowedAmount > 0 ? formatCredits(borrowedAmount) : "None"}</p>
             <p class="metric-line">Estimated interest: ${borrowedAmount > 0 ? formatCredits(estimatedInterest) : "0 cr"}</p>
             <p class="metric-line">Projected result ${borrowedAmount > 0 ? "(after interest)" : ""}: <span class="${(fullPlan?.totalEstimatedProfit || 0) - estimatedInterest >= 0 ? "pos" : "neg"}">${((fullPlan?.totalEstimatedProfit || 0) - estimatedInterest) >= 0 ? "+" : ""}${formatCredits((fullPlan?.totalEstimatedProfit || 0) - estimatedInterest)}</span></p>
+            ${partialPlan && partialPlan.loadedUnits > 0 ? `<p class="metric-line">Partial-load coverage: ${partialPlan.loadedUnits} / ${partialPlan.totalCapacity}</p><div class="progress-line"><div class="progress-fill warn" style="width:${partialPct}%"></div></div>` : ""}
           </article>
           <div class="inline-actions">
             <button class="btn launch-mission-btn" data-mode="full" type="button" ${(selectedShips.length === 0 || !fullPlan || fullPlan.totalUpfrontCost > gameState.credits || fullPlan.loadedUnits <= 0) ? "disabled" : ""}>Launch Full Mission</button>

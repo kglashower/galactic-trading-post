@@ -60,7 +60,7 @@ select {
 .help-fab {
   position: fixed;
   right: 0.9rem;
-  top: 0.9rem;
+  bottom: max(0.9rem, env(safe-area-inset-bottom));
   z-index: 30;
   border: 1px solid rgba(111, 170, 255, 0.48);
   background: linear-gradient(135deg, rgba(12, 40, 83, 0.96), rgba(11, 99, 120, 0.96));
@@ -254,6 +254,10 @@ h3 {
   height: 100%;
   border-radius: inherit;
   background: linear-gradient(90deg, var(--accent), var(--accent-2));
+}
+
+.progress-fill.warn {
+  background: linear-gradient(90deg, #ffca72, #ff9e62);
 }
 
 .hub-grid {
