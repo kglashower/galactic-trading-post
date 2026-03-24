@@ -1,76 +1,51 @@
 "use strict";
 
-/*
-Economy:
-- Credits are earned by buying cargo at the home system and selling at a destination system.
-- Each mission carries fixed cargo (10 units) each way: outbound from home, then return cargo back home.
-- Prices are derived from system type rules: 2 high commodities, 2 low commodities, 2 neutral.
-
-System type generation:
-- From 6 commodities, generate all unique types by choosing 2 highs and then 2 lows from the remaining 4.
-- This produces 90 valid non-overlapping system types.
-
-File structure:
-- Constants + data model generation
-- Game state creation/load/save and mission logic
-- UI rendering and event wiring
-*/
-
-const STORAGE_KEY = "galacticTradingPostSave_v1";
+const STORAGE_KEY = "galacticTradingPostSave_v2";
 const TICK_INTERVAL_MS = 1000;
 
 const BALANCE = {
   STARTING_CREDITS: 500,
-  CARGO_SIZE: 10,
-  STARTING_MERCHANT_SHIPS: 1,
   STARTING_DISCOVERED_COUNT: 4,
   REMOTE_SYSTEM_COUNT: 100,
-  MERCHANT_SHIP_BASE_COST: 300,
-  MERCHANT_SHIP_COST_GROWTH: 1.16,
-  CARGO_UPGRADE_BASE_COST: 240,
-  CARGO_UPGRADE_COST_GROWTH: 1.55,
-  SPEED_UPGRADE_BASE_COST: 280,
-  SPEED_UPGRADE_COST_GROWTH: 1.65,
-  UPGRADE_BASE_SECONDS: 5 * 60,
-  UPGRADE_DURATION_GROWTH: 1.5,
+  STARTING_MERCHANT_SHIPS: 1,
+  STARTING_MAX_MERCHANT_SHIPS: 3,
+  MERCHANT_SHIP_BASE_COST: 500,
+  MERCHANT_SHIP_COST_GROWTH: 1.1,
+  BASE_CARGO_SIZE: 10,
   CARGO_PER_LEVEL: 2,
+  CARGO_UPGRADE_BASE_COST: 260,
+  CARGO_UPGRADE_COST_GROWTH: 1.45,
+  SPEED_UPGRADE_BASE_COST: 300,
+  SPEED_UPGRADE_COST_GROWTH: 1.5,
+  UPGRADE_BASE_SECONDS: 5 * 60,
+  UPGRADE_DURATION_GROWTH: 1.45,
   SPEED_DURATION_MULT_PER_LEVEL: 0.9,
   SPEED_DURATION_MIN_MULTIPLIER: 0.55,
-  SCOUT_SHIP_COST: 800,
+  SCOUT_SHIP_COST: 900,
   TRADE_TIME_PER_DISTANCE: 14,
   SCOUT_BASE_MISSION_SECONDS: 20 * 60,
   SCOUT_MISSION_INCREMENT_SECONDS: 5 * 60,
   CONTRACT_COUNT: 3,
-  CONTRACT_BOUNTY_PER_UNIT_DISTANCE: 8,
-  CONTRACT_BASE_DURATION_SECONDS: 20 * 60,
-  CONTRACT_DISTANCE_DURATION_SECONDS: 5 * 60,
-  CONTRACT_UNIT_DURATION_SECONDS: 20,
-  ENVOY_RECRUIT_BASE_COST: 5,
-  ENVOY_RECRUIT_COST_GROWTH: 2,
+  CONTRACT_BOUNTY_PER_UNIT_DISTANCE: 13,
+  CONTRACT_DIFFICULTY_MULTIPLIER: { 1: 1, 2: 1.5, 3: 2.2 },
+  CONTRACT_BASE_DEADLINE_SECONDS: { 1: 45 * 60, 2: 38 * 60, 3: 30 * 60 },
+  CONTRACT_DEADLINE_DISTANCE_SECONDS: { 1: 5 * 60, 2: 4 * 60, 3: 3 * 60 },
+  CONTRACT_DEADLINE_UNIT_SECONDS: { 1: 22, 2: 20, 3: 18 },
   ENVOY_LEVEL_XP_STEP: 25,
-  ENVOY_MAX_BONUS: 0.12,
-  ENVOY_BONUS_PER_LEVEL: 0.015,
+  ENVOY_BONUS_PER_LEVEL: 0.0125,
+  ENVOY_MAX_BONUS: 0.1,
   FINANCE_RATE_PER_MINUTE: 0.01,
   FINANCE_MIN_BILLED_MINUTES: 5,
-  MARKET_PRESSURE_BUY_STEP: 0.03,
-  MARKET_PRESSURE_SELL_STEP: 0.03,
-  MARKET_PRESSURE_MAX: 0.25,
-  MARKET_PRESSURE_DECAY_PER_TICK: 0.998,
-  MARKET_PRESSURE_EPSILON: 0.0005,
+  MARKET_PRESSURE_STEP: 0.025,
+  MARKET_PRESSURE_MAX: 0.2,
+  MARKET_PRESSURE_DECAY_PER_SECOND: 0.9985,
   MARKET_EVENT_DURATION_SECONDS: 20 * 60,
-  MARKET_EVENT_INTERVAL_SECONDS: 10 * 60,
-  STRUCTURAL_EVENT_MIN_SECONDS: 20 * 60 * 60,
-  STRUCTURAL_EVENT_MAX_SECONDS: 30 * 60 * 60,
-  STRUCTURAL_EVENT_SYSTEM_CHANCE: 0.9,
-  PRICE_HIGH_MIN: 1.25,
-  PRICE_HIGH_MAX: 1.5,
-  PRICE_LOW_MIN: 0.58,
-  PRICE_LOW_MAX: 0.82,
-  PRICE_NEUTRAL_MIN: 0.9,
-  PRICE_NEUTRAL_MAX: 1.1,
-  HOME_PRICE_MIN: 0.93,
-  HOME_PRICE_MAX: 1.08,
-  MAX_LOG_ENTRIES: 40
+  MARKET_EVENT_OFFSET_SECONDS: 10 * 60,
+  STRUCTURAL_EVENT_MIN_SECONDS: 8 * 60 * 60,
+  STRUCTURAL_EVENT_MAX_SECONDS: 12 * 60 * 60,
+  GLOBAL_BASE_SHIFT_PERCENT: 0.1,
+  MAX_LOG_ENTRIES: 60,
+  MAX_TRADE_HISTORY: 180
 };
 
 const COMMODITIES = [
@@ -82,6 +57,7 @@ const COMMODITIES = [
   { id: "medicine", name: "Medicine", basePrice: 40 }
 ];
 
+const COMMODITY_INDEX = Object.fromEntries(COMMODITIES.map((item) => [item.id, item]));
 const COMMODITY_ICONS = {
   food: "🍞",
   water: "💧",
@@ -90,9 +66,15 @@ const COMMODITY_ICONS = {
   electronics: "🔌",
   medicine: "🧪"
 };
-const INITIAL_GLOBAL_BASE_PRICES = Object.freeze(
-  Object.fromEntries(COMMODITIES.map((commodity) => [commodity.id, commodity.basePrice]))
-);
+const GLOBAL_BASE_PRICES = Object.fromEntries(COMMODITIES.map((item) => [item.id, item.basePrice]));
+
+const MARKET_TIER_DEFS = [
+  { label: "Very Low", className: "tag-very-low", ratio: 0.68 },
+  { label: "Low", className: "tag-low", ratio: 0.82 },
+  { label: "Normal", className: "tag-normal", ratio: 1 },
+  { label: "High", className: "tag-high", ratio: 1.18 },
+  { label: "Very High", className: "tag-very-high", ratio: 1.36 }
+];
 
 const SHIP_NAME_MAX_LENGTH = 20;
 const SHIP_NAME_COLOR_OPTIONS = [
@@ -103,234 +85,181 @@ const SHIP_NAME_COLOR_OPTIONS = [
   { value: "#d2c1ff", label: "Violet" },
   { value: "#ffffff", label: "White" }
 ];
-const SHIP_NAME_COLORS = SHIP_NAME_COLOR_OPTIONS.map((c) => c.value);
+const SHIP_NAME_COLORS = SHIP_NAME_COLOR_OPTIONS.map((item) => item.value);
 
-const COMMODITY_INDEX = Object.fromEntries(COMMODITIES.map((c) => [c.id, c]));
-const SYSTEM_TYPES = generateSystemTypes(COMMODITIES.map((c) => c.id));
-const MARKET_TIER_DEFS = [
-  { label: "Very Low", className: "tag-very-low", targetRatio: 0.68 },
-  { label: "Low", className: "tag-low", targetRatio: 0.82 },
-  { label: "Normal", className: "tag-normal", targetRatio: 1.0 },
-  { label: "High", className: "tag-high", targetRatio: 1.18 },
-  { label: "Very High", className: "tag-very-high", targetRatio: 1.36 }
-];
+const SECTION_CONFIG = {
+  trade: { title: "Trade Exchange", kicker: "Market Hall" },
+  navigation: { title: "Navigation Office", kicker: "Astrogation Desk" },
+  fleet: { title: "Merchant Fleet", kicker: "Operations Concourse" },
+  shipyard: { title: "Shipyard", kicker: "Fabrication Ring" },
+  hangar: { title: "Hangar", kicker: "Service Berths" },
+  contracts: { title: "Corporate Contracts", kicker: "Brokerage Wing" },
+  envoys: { title: "Trade Envoys", kicker: "Diplomatic Annex" },
+  analytics: { title: "Trade Analytics", kicker: "Ledger Vault" },
+  news: { title: "Newsfeed & History", kicker: "Comms Relay" }
+};
+
 const MARKET_EVENT_COPY = {
   food: {
     up: [
-      { headline: "Crop Blight", body: "A fungal blight damaged hydroponic harvests, pushing food demand sharply upward." },
-      { headline: "Refugee Influx", body: "Emergency arrivals are straining local food reserves and driving prices higher." }
+      { headline: "Crop Blight", body: "A fungal bloom wiped out hydroponic trays and food demand is surging." },
+      { headline: "Refugee Intake", body: "Emergency arrivals have stretched station ration reserves beyond plan." }
     ],
     down: [
-      { headline: "Harvest Surge", body: "A bumper harvest flooded station markets with surplus food supplies." },
-      { headline: "Relief Convoy", body: "Aid shipments unloaded massive food stores, easing local scarcity." }
+      { headline: "Harvest Surge", body: "A bumper harvest flooded cargo docks with cheap food stock." },
+      { headline: "Relief Convoy", body: "Aid haulers dumped surplus food stores into the market." }
     ]
   },
   water: {
     up: [
-      { headline: "Purifier Failure", body: "Water reclamation systems are down, forcing importers to pay a premium." },
-      { headline: "Reservoir Leak", body: "Storage losses have tightened potable water supply across the system." }
+      { headline: "Purifier Failure", body: "Water reclamation systems are offline and imports now command a premium." },
+      { headline: "Reservoir Leak", body: "Storage losses cut available potable reserves across the system." }
     ],
     down: [
-      { headline: "Ice Hauler Arrival", body: "Fresh ice haulers delivered abundant water stock to local markets." },
-      { headline: "Filtration Upgrade", body: "New purification arrays restored water output faster than expected." }
+      { headline: "Ice Freighter Arrival", body: "Fresh ice haulers overfilled tanks and eased local demand." },
+      { headline: "Filtration Upgrade", body: "New purifier arrays restored clean water output faster than forecast." }
     ]
   },
   ore: {
     up: [
-      { headline: "Foundry Expansion", body: "Industrial refits have triggered a rush on raw ore contracts." },
-      { headline: "Construction Boom", body: "Orbital construction yards are consuming ore faster than miners can deliver it." }
+      { headline: "Foundry Expansion", body: "Orbital foundries signed new intake contracts and ore bids are climbing." },
+      { headline: "Construction Boom", body: "New hullworks projects are devouring raw ore around the clock." }
     ],
     down: [
-      { headline: "Mining Glut", body: "New excavation runs overwhelmed buyers with excess ore stock." },
-      { headline: "Freighter Dump", body: "Several bulk haulers unloaded ore at once, depressing spot prices." }
+      { headline: "Mining Glut", body: "A fresh wave of excavation runs left brokers sitting on excess ore." },
+      { headline: "Bulk Dump", body: "Multiple haulers unloaded ore at once and crushed the spot market." }
     ]
   },
   fuel: {
     up: [
-      { headline: "Patrol Mobilization", body: "Security fleets are burning through reserves and bidding up fuel prices." },
-      { headline: "Jump Corridor Surge", body: "Heavy traffic through local lanes has strained refinery output." }
+      { headline: "Patrol Surge", body: "Security flotillas are burning reserves and bidding hard for fuel." },
+      { headline: "Lane Congestion", body: "Heavy jump traffic is draining refinery output faster than expected." }
     ],
     down: [
-      { headline: "Refinery Overrun", body: "Refineries overshot demand and local depots are stuffed with fuel." },
-      { headline: "Route Quieting", body: "Travel demand dipped sharply, leaving fuel suppliers with surplus stock." }
+      { headline: "Refinery Overrun", body: "Refineries overshot the mark and depots are loaded with excess fuel." },
+      { headline: "Traffic Slump", body: "A quiet travel window left fuel suppliers competing for buyers." }
     ]
   },
   electronics: {
     up: [
-      { headline: "Relay Retrofit", body: "Navigation relays are being upgraded, sending electronics demand soaring." },
-      { headline: "Signal Blackout", body: "Emergency comms repairs are draining local electronics inventories." }
+      { headline: "Relay Retrofit", body: "Comms relays are being rebuilt and electronics demand spiked overnight." },
+      { headline: "Signal Blackout", body: "Emergency repairs are chewing through local electronics inventory." }
     ],
     down: [
-      { headline: "Factory Oversupply", body: "A manufacturing run produced more electronics than brokers can move." },
-      { headline: "Warehouse Clearance", body: "Storage operators are liquidating electronics stock at discount prices." }
+      { headline: "Factory Oversupply", body: "A manufacturing wave produced far more boards than brokers can place." },
+      { headline: "Warehouse Clearance", body: "Storage firms are liquidating electronics stock at discount." }
     ]
   },
   medicine: {
     up: [
-      { headline: "Disease Outbreak", body: "A local outbreak has spiked urgent medicine demand across civilian clinics." },
-      { headline: "Hospital Overflow", body: "Overloaded medical wards are paying a premium for fresh supplies." }
+      { headline: "Disease Outbreak", body: "Civilian clinics are urgently restocking medicine during an outbreak." },
+      { headline: "Hospital Overflow", body: "Packed wards are paying a premium for fresh medical supplies." }
     ],
     down: [
-      { headline: "Cure Shipment", body: "A major medical convoy delivered enough stock to stabilize treatment demand." },
-      { headline: "Clinical Recovery", body: "Case numbers are falling and medicine buyers are stepping back." }
+      { headline: "Cure Shipment", body: "A major convoy delivered enough medicine to calm emergency demand." },
+      { headline: "Clinical Recovery", body: "Case numbers are falling and medical buyers are backing off." }
     ]
   }
 };
+
 const STRUCTURAL_EVENT_COPY = {
   system: {
     up: [
-      { headline: "Charter Refit", body: "A permanent industrial refit has made local buyers structurally more aggressive." },
-      { headline: "Colonial Expansion", body: "Long-term habitat growth is keeping demand elevated beyond a temporary boom." }
+      { headline: "Charter Refit", body: "A permanent industrial refit pushed local buyers into a more aggressive price tier." },
+      { headline: "Colonial Expansion", body: "Long-term population growth structurally raised demand in this market." }
     ],
     down: [
-      { headline: "Local Substitution", body: "New local production lines permanently reduced import dependence." },
-      { headline: "Supply Corridor", body: "A stabilized trade corridor has structurally eased procurement pressure." }
+      { headline: "Local Substitution", body: "New domestic production permanently reduced import dependence." },
+      { headline: "Supply Corridor", body: "A stabilized freight corridor permanently softened procurement pressure." }
     ]
   },
   global: {
     up: [
-      { headline: "Sector-Wide Shortage", body: "A broad supply squeeze has reset contract pricing across the network." },
-      { headline: "Galactic Tariff Shift", body: "New freight and tariff rules have permanently raised clearing prices." }
+      { headline: "Sector-Wide Shortage", body: "A broad supply squeeze reset baseline pricing across the trade network." },
+      { headline: "Galactic Tariff Shift", body: "New interstellar tariffs permanently pushed the base market upward." }
     ],
     down: [
-      { headline: "Process Breakthrough", body: "A production breakthrough has pushed the galactic baseline downward." },
-      { headline: "Distribution Reform", body: "More efficient logistics have permanently lowered market clearing costs." }
+      { headline: "Process Breakthrough", body: "A production breakthrough permanently lowered baseline clearing prices." },
+      { headline: "Distribution Reform", body: "Improved logistics permanently drove down the galactic baseline." }
     ]
   }
 };
-const CONTRACT_COPY = [
-  {
-    issuer: "Orion Procurement",
-    headline: "Emergency Fulfillment",
-    body: "A client needs a guaranteed bulk delivery on a hard deadline."
-  },
-  {
-    issuer: "Helix Logistics",
-    headline: "Priority Requisition",
-    body: "A premium contract is open for a high-volume shipment to a remote buyer."
-  },
-  {
-    issuer: "Cinder Mercantile",
-    headline: "Expedited Supply Run",
-    body: "Corporate buyers are paying aggressively for a fast, reliable shipment."
-  }
+
+const CONTRACT_ISSUERS = [
+  "Orion Procurement",
+  "Helix Logistics",
+  "Cinder Mercantile",
+  "Spindle Brokerage",
+  "Vastline Holdings",
+  "Apex Transfer"
 ];
-const ENVOY_NAME_PARTS_A = [
-  "Cassian",
-  "Lyra",
-  "Tavian",
-  "Mira",
-  "Orin",
-  "Selka",
-  "Ivo",
-  "Nera",
-  "Dorian",
-  "Vela",
-  "Kestrel",
-  "Soren"
+const CONTRACT_HEADLINES = [
+  "Emergency Fulfillment",
+  "Priority Requisition",
+  "Expedited Supply Run",
+  "Board-Level Delivery",
+  "Deadline Freight",
+  "Strategic Transfer"
 ];
-const ENVOY_NAME_PARTS_B = [
-  "Vale",
-  "Quill",
-  "Morrow",
-  "Drake",
-  "Voss",
-  "Prynn",
-  "Kade",
-  "Rhex",
-  "Solari",
-  "Thorne",
-  "Mercer",
-  "Raine"
+const CONTRACT_BODIES = [
+  "A premium buyer will pay well for dependable bulk delivery.",
+  "This lane has boardroom attention. Miss the deadline and the contract goes cold.",
+  "A remote client is paying aggressively for guaranteed supply.",
+  "This contract rewards capacity, speed, and a steady hand under pressure."
 ];
 
-const NAME_PARTS_A = [
-  "Orion",
-  "Cygnus",
-  "Draco",
-  "Vega",
-  "Helios",
-  "Nyx",
-  "Talos",
-  "Astra",
-  "Nadir",
-  "Erebus",
-  "Nova",
-  "Zenith",
-  "Lumen",
-  "Argon",
-  "Selene",
-  "Atlas",
-  "Cinder",
-  "Echo",
-  "Kepler",
-  "Vesper"
+const ENVOY_FIRST_NAMES = [
+  "Cassian", "Lyra", "Tavian", "Mira", "Orin", "Selka", "Ivo", "Nera", "Dorian", "Vela", "Kestrel", "Soren",
+  "Ari", "Kael", "Junia", "Riven", "Talia", "Bram", "Niko", "Soraya", "Pax", "Elio", "Maelin", "Corin"
+];
+const ENVOY_LAST_NAMES = [
+  "Vale", "Quill", "Morrow", "Drake", "Voss", "Prynn", "Kade", "Rhex", "Solari", "Thorne", "Mercer", "Raine",
+  "Lorr", "Vey", "Marek", "Sable", "Kellan", "Dax", "Norrin", "Taris", "Veyra", "Hale", "Corvus", "Lune"
 ];
 
-const NAME_PARTS_B = [
-  "Prime",
-  "Gate",
-  "Reach",
-  "Bastion",
-  "Harbor",
-  "Station",
-  "Frontier",
-  "Spindle",
-  "Junction",
-  "Haven",
-  "Array",
-  "Crossing",
-  "Drift",
-  "Spur",
-  "Anvil",
-  "Vault",
-  "Arc",
-  "Port",
-  "Node",
-  "Ember"
+const SYSTEM_NAME_A = [
+  "Orion", "Cygnus", "Draco", "Vega", "Helios", "Nyx", "Talos", "Astra", "Nadir", "Erebus", "Nova", "Zenith",
+  "Lumen", "Argon", "Selene", "Atlas", "Cinder", "Echo", "Kepler", "Vesper", "Quasar", "Aegis", "Sable", "Rhea"
+];
+const SYSTEM_NAME_B = [
+  "Prime", "Gate", "Reach", "Bastion", "Harbor", "Station", "Frontier", "Spindle", "Junction", "Haven", "Array", "Crossing",
+  "Drift", "Spur", "Anvil", "Vault", "Arc", "Port", "Node", "Ember", "Rise", "Mirror", "Bridge", "Beacon"
 ];
 
-function combinations(arr, choose) {
+function combinations(arr, size) {
   const result = [];
-
-  function backtrack(start, combo) {
-    if (combo.length === choose) {
+  function walk(start, combo) {
+    if (combo.length === size) {
       result.push([...combo]);
       return;
     }
-
     for (let i = start; i < arr.length; i += 1) {
       combo.push(arr[i]);
-      backtrack(i + 1, combo);
+      walk(i + 1, combo);
       combo.pop();
     }
   }
-
-  backtrack(0, []);
+  walk(0, []);
   return result;
 }
 
-function generateSystemTypes(commodityIds) {
-  const types = [];
-  const highCombos = combinations(commodityIds, 2);
-
-  for (const high of highCombos) {
-    const remaining = commodityIds.filter((id) => !high.includes(id));
-    const lowCombos = combinations(remaining, 2);
-
-    for (const low of lowCombos) {
-      const sortedHigh = [...high].sort();
-      const sortedLow = [...low].sort();
-      types.push({
-        id: `h:${sortedHigh.join("-")}|l:${sortedLow.join("-")}`,
-        high: sortedHigh,
-        low: sortedLow
+function generateSystemTypes(ids) {
+  const result = [];
+  const highs = combinations(ids, 2);
+  for (const high of highs) {
+    const remaining = ids.filter((id) => !high.includes(id));
+    for (const low of combinations(remaining, 2)) {
+      result.push({
+        id: `h:${[...high].sort().join("-")}|l:${[...low].sort().join("-")}`,
+        high: [...high].sort(),
+        low: [...low].sort()
       });
     }
   }
-
-  return types;
+  return result;
 }
+
+const SYSTEM_TYPES = generateSystemTypes(COMMODITIES.map((item) => item.id));
 
 function hashString(str) {
   let hash = 2166136261;
@@ -341,37 +270,47 @@ function hashString(str) {
   return hash >>> 0;
 }
 
-function seededFraction(seedText) {
-  const h = hashString(seedText);
-  return (h % 1000000) / 1000000;
+function seededFraction(seed) {
+  return (hashString(seed) % 1000000) / 1000000;
 }
 
-function randBetween(min, max, seedText) {
-  return min + (max - min) * seededFraction(seedText);
+function randBetween(min, max, seed) {
+  return min + (max - min) * seededFraction(seed);
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function roundTenths(value) {
+  return Math.round(value * 10) / 10;
 }
 
 function clampPositiveInt(value) {
   return Math.max(1, Math.round(value));
 }
 
+function nowIso() {
+  return new Date().toISOString();
+}
+
 function formatCredits(value) {
-  const rounded = Math.round(value);
-  return `${rounded.toLocaleString()} cr`;
+  return `${Math.round(value).toLocaleString()} cr`;
 }
 
 function formatSeconds(totalSeconds) {
-  const sec = Math.max(0, Math.floor(totalSeconds));
-  const mins = Math.floor(sec / 60);
-  const rem = sec % 60;
-  return `${mins}:${String(rem).padStart(2, "0")}`;
+  const seconds = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const rem = seconds % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(rem).padStart(2, "0")}`;
+  }
+  return `${minutes}:${String(rem).padStart(2, "0")}`;
 }
 
 function formatDistanceLy(distance) {
   return `${Number(distance).toFixed(1)} LY`;
-}
-
-function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value));
 }
 
 function escapeHtml(value) {
@@ -383,182 +322,128 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
-function getCommodityMarketLevel(system, commodityId) {
-  if (!system || !COMMODITY_INDEX[commodityId]) {
-    return MARKET_TIER_DEFS[2];
-  }
-
-  const currentPrice = system.prices?.[commodityId];
-  const basePrice = COMMODITY_INDEX[commodityId].basePrice;
-  if (!Number.isFinite(currentPrice) || !Number.isFinite(basePrice) || basePrice <= 0) {
-    return MARKET_TIER_DEFS[2];
-  }
-
-  const ratio = currentPrice / basePrice;
-  if (ratio >= 1.28) {
-    return MARKET_TIER_DEFS[4];
-  }
-  if (ratio >= 1.12) {
-    return MARKET_TIER_DEFS[3];
-  }
-  if (ratio <= 0.72) {
-    return MARKET_TIER_DEFS[0];
-  }
-  if (ratio <= 0.88) {
-    return MARKET_TIER_DEFS[1];
-  }
-  return MARKET_TIER_DEFS[2];
+function combinationsKey(ids) {
+  return [...ids].sort().join("+");
 }
 
-function renderCommodityLabel(commodityId, marketSystem) {
-  const commodity = COMMODITY_INDEX[commodityId];
-  const badge = getCommodityMarketLevel(marketSystem, commodityId);
-  if (!commodity) {
-    return commodityId;
+function getLevelThreshold(level) {
+  if (level <= 1) {
+    return 0;
   }
-  return `${COMMODITY_ICONS[commodityId] || ""} ${commodity.name} <span class="commodity-tag ${badge.className}">${badge.label}</span>`;
+  return Math.round(((level - 1) * (level + 4)) / 2);
 }
 
-function getTradeMissionDuration(distance) {
-  const oneWaySeconds = Math.max(6, distance * BALANCE.TRADE_TIME_PER_DISTANCE);
-  return oneWaySeconds * 2;
+function getLevelForReputation(xp) {
+  let level = 1;
+  while (xp >= getLevelThreshold(level + 1)) {
+    level += 1;
+  }
+  return level;
 }
 
-function getScoutMissionDuration(state) {
-  return (
-    BALANCE.SCOUT_BASE_MISSION_SECONDS +
-    state.scoutMissionsLaunched * BALANCE.SCOUT_MISSION_INCREMENT_SECONDS
-  );
+function getReputationProgress(level, xp) {
+  const current = getLevelThreshold(level);
+  const next = getLevelThreshold(level + 1);
+  const span = Math.max(1, next - current);
+  return {
+    current,
+    next,
+    inLevel: xp - current,
+    span,
+    pct: clamp(((xp - current) / span) * 100, 0, 100)
+  };
 }
 
-function getShipDisplayName(ship) {
-  return ship.name || ship.id.toUpperCase();
+function getNonEnvoyRewardCount(level) {
+  let count = 0;
+  for (let i = 2; i <= level; i += 1) {
+    if (i % 3 !== 0) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
-function getShipCargoUnits(state, ship) {
-  return state.cargoSize + ship.cargoLevel * BALANCE.CARGO_PER_LEVEL;
+function getDerivedMaxMerchantShips(level, currentShips = 1) {
+  return Math.max(currentShips, BALANCE.STARTING_MAX_MERCHANT_SHIPS + getNonEnvoyRewardCount(level));
+}
+
+function getTradeEnvoyLevel(xp) {
+  return Math.floor(Math.sqrt(Math.max(0, xp) / BALANCE.ENVOY_LEVEL_XP_STEP)) + 1;
+}
+
+function getTradeEnvoyBonusRate(envoy) {
+  return Math.min(BALANCE.ENVOY_MAX_BONUS, getTradeEnvoyLevel(envoy?.xp || 0) * BALANCE.ENVOY_BONUS_PER_LEVEL);
+}
+
+function getMerchantShipCostForCount(existingShips) {
+  return clampPositiveInt(BALANCE.MERCHANT_SHIP_BASE_COST * Math.pow(BALANCE.MERCHANT_SHIP_COST_GROWTH, Math.max(0, existingShips - BALANCE.STARTING_MERCHANT_SHIPS)));
+}
+
+function getShipCargoUnits(ship) {
+  return BALANCE.BASE_CARGO_SIZE + (ship.cargoLevel || 0) * BALANCE.CARGO_PER_LEVEL;
 }
 
 function getShipSpeedMultiplier(ship) {
   return Math.max(
     BALANCE.SPEED_DURATION_MIN_MULTIPLIER,
-    Math.pow(BALANCE.SPEED_DURATION_MULT_PER_LEVEL, ship.speedLevel)
+    Math.pow(BALANCE.SPEED_DURATION_MULT_PER_LEVEL, ship.speedLevel || 0)
   );
 }
 
-function getShipTradeDuration(distance, ship) {
-  return Math.max(6, Math.round(getTradeMissionDuration(distance) * getShipSpeedMultiplier(ship)));
+function getTradeDurationForShip(distance, ship) {
+  return Math.max(6, Math.round(distance * BALANCE.TRADE_TIME_PER_DISTANCE * 2 * getShipSpeedMultiplier(ship)));
 }
 
-function getTradeEscrowPerUnit(outboundSellPriceEstimate, returnBuyPriceEstimate) {
-  return Math.max(0, returnBuyPriceEstimate - outboundSellPriceEstimate);
+function getScoutMissionDuration(state) {
+  return BALANCE.SCOUT_BASE_MISSION_SECONDS + (state.scoutMissionsLaunched || 0) * BALANCE.SCOUT_MISSION_INCREMENT_SECONDS;
+}
+
+function getUpgradeCost(ship, type) {
+  if (type === "cargo") {
+    return clampPositiveInt(BALANCE.CARGO_UPGRADE_BASE_COST * Math.pow(BALANCE.CARGO_UPGRADE_COST_GROWTH, ship.cargoLevel || 0));
+  }
+  return clampPositiveInt(BALANCE.SPEED_UPGRADE_BASE_COST * Math.pow(BALANCE.SPEED_UPGRADE_COST_GROWTH, ship.speedLevel || 0));
+}
+
+function getUpgradeDuration(ship, type) {
+  const level = type === "cargo" ? ship.cargoLevel || 0 : ship.speedLevel || 0;
+  return clampPositiveInt(BALANCE.UPGRADE_BASE_SECONDS * Math.pow(BALANCE.UPGRADE_DURATION_GROWTH, level));
 }
 
 function getMissionFinanceInterest(principal, durationSeconds) {
   const borrowed = Math.max(0, Number(principal) || 0);
-  const minutes = Math.max(
-    BALANCE.FINANCE_MIN_BILLED_MINUTES,
-    Math.ceil(Math.max(0, Number(durationSeconds) || 0) / 60)
-  );
-  return Math.round(borrowed * BALANCE.FINANCE_RATE_PER_MINUTE * minutes);
+  const billedMinutes = Math.max(BALANCE.FINANCE_MIN_BILLED_MINUTES, Math.ceil((durationSeconds || 0) / 60));
+  return Math.round(borrowed * BALANCE.FINANCE_RATE_PER_MINUTE * billedMinutes);
 }
 
-function getMissionFinanceRepayment(principal, durationSeconds) {
-  const borrowed = Math.max(0, Number(principal) || 0);
-  return borrowed + getMissionFinanceInterest(borrowed, durationSeconds);
+function getTradeEscrowPerUnit(outboundSellEstimate, returnBuyEstimate) {
+  return Math.max(0, returnBuyEstimate - outboundSellEstimate);
 }
 
-function buildTradeLoadPlan(state, selectedShips, distance, outboundBuyPrice, outboundSellPriceEstimate, returnBuyPriceEstimate, returnSellPriceEstimate, availableCredits, allowPartialLoad) {
-  const escrowPerUnit = getTradeEscrowPerUnit(outboundSellPriceEstimate, returnBuyPriceEstimate);
-  const upfrontCostPerUnit = outboundBuyPrice + escrowPerUnit;
-  const shipCapacities = selectedShips.map((ship) => ({
-    ship,
-    capacityUnits: getShipCargoUnits(state, ship)
-  }));
-  const totalCapacityUnits = shipCapacities.reduce((sum, item) => sum + item.capacityUnits, 0);
-  const affordableUnits = Math.min(
-    totalCapacityUnits,
-    Math.floor(availableCredits / upfrontCostPerUnit)
-  );
-  const targetUnits = allowPartialLoad ? affordableUnits : totalCapacityUnits;
+function getEnvoyBlueprints() {
+  const singles = COMMODITIES
+    .slice()
+    .sort((a, b) => a.basePrice - b.basePrice || a.id.localeCompare(b.id))
+    .map((commodity, index) => ({
+      index,
+      specialtyCommodityIds: [commodity.id],
+      sortValue: commodity.basePrice,
+      label: commodity.name
+    }));
 
-  if (targetUnits <= 0) {
-    return {
-      plans: [],
-      totalCapacityUnits,
-      loadedUnits: 0,
-      upfrontCostPerUnit,
-      affordableUnits: 0
-    };
-  }
+  const pairs = combinations(COMMODITIES.map((item) => item.id), 2)
+    .map((pair) => ({
+      specialtyCommodityIds: [...pair].sort(),
+      sortValue: COMMODITY_INDEX[pair[0]].basePrice + COMMODITY_INDEX[pair[1]].basePrice,
+      label: pair.map((id) => COMMODITY_INDEX[id].name).join(" / ")
+    }))
+    .sort((a, b) => a.sortValue - b.sortValue || combinationsKey(a.specialtyCommodityIds).localeCompare(combinationsKey(b.specialtyCommodityIds)));
 
-  let remainingUnits = targetUnits;
-  const plans = shipCapacities
-    .map(({ ship, capacityUnits }) => {
-      const units = Math.min(capacityUnits, remainingUnits);
-      remainingUnits -= units;
-      if (units <= 0) {
-        return null;
-      }
-
-      const outboundCost = outboundBuyPrice * units;
-      const estimatedOutboundRevenue = outboundSellPriceEstimate * units;
-      const estimatedReturnCost = returnBuyPriceEstimate * units;
-      const escrowReserved = escrowPerUnit * units;
-      const upfrontCost = outboundCost + escrowReserved;
-      const estimatedProfit =
-        (outboundSellPriceEstimate - outboundBuyPrice + (returnSellPriceEstimate - returnBuyPriceEstimate)) * units;
-
-      return {
-        ship,
-        capacityUnits,
-        units,
-        outboundCost,
-        estimatedOutboundRevenue,
-        estimatedReturnCost,
-        escrowReserved,
-        upfrontCost,
-        estimatedProfit,
-        durationSeconds: getShipTradeDuration(distance, ship)
-      };
-    })
-    .filter(Boolean);
-
-  return {
-    plans,
-    totalCapacityUnits,
-    loadedUnits: plans.reduce((sum, plan) => sum + plan.units, 0),
-    upfrontCostPerUnit,
-    affordableUnits,
-    totalUpfrontCost: plans.reduce((sum, plan) => sum + plan.upfrontCost, 0),
-    totalEstimatedProfit: plans.reduce((sum, plan) => sum + plan.estimatedProfit, 0),
-    totalEstimatedOutboundRevenue: plans.reduce((sum, plan) => sum + plan.estimatedOutboundRevenue, 0),
-    totalEstimatedReturnCost: plans.reduce((sum, plan) => sum + plan.estimatedReturnCost, 0)
-  };
+  return [...singles, ...pairs];
 }
 
-function findTradeEnvoy(state, envoyId) {
-  return (state.tradeEnvoys || []).find((envoy) => envoy.id === envoyId) || null;
-}
-
-function getCargoUpgradeCost(ship) {
-  return clampPositiveInt(
-    BALANCE.CARGO_UPGRADE_BASE_COST * Math.pow(BALANCE.CARGO_UPGRADE_COST_GROWTH, ship.cargoLevel)
-  );
-}
-
-function getSpeedUpgradeCost(ship) {
-  return clampPositiveInt(
-    BALANCE.SPEED_UPGRADE_BASE_COST * Math.pow(BALANCE.SPEED_UPGRADE_COST_GROWTH, ship.speedLevel)
-  );
-}
-
-function getUpgradeDurationSeconds(ship, upgradeType) {
-  const currentLevel = upgradeType === "cargo" ? ship.cargoLevel : ship.speedLevel;
-  return clampPositiveInt(
-    BALANCE.UPGRADE_BASE_SECONDS * Math.pow(BALANCE.UPGRADE_DURATION_GROWTH, currentLevel)
-  );
-}
+const ENVOY_BLUEPRINTS = getEnvoyBlueprints();
 
 function createZeroPressureMap() {
   const pressure = {};
@@ -568,734 +453,198 @@ function createZeroPressureMap() {
   return pressure;
 }
 
-function createZeroTierShiftMap() {
-  const shifts = {};
+function createZeroShiftMap() {
+  const shift = {};
   for (const commodity of COMMODITIES) {
-    shifts[commodity.id] = 0;
+    shift[commodity.id] = 0;
   }
-  return shifts;
-}
-
-function createBasePriceMap() {
-  return { ...INITIAL_GLOBAL_BASE_PRICES };
-}
-
-function applyGlobalBasePrices(state) {
-  const source = state?.globalBasePrices || INITIAL_GLOBAL_BASE_PRICES;
-  for (const commodity of COMMODITIES) {
-    const nextBasePrice = Number.isFinite(source[commodity.id]) ? Math.max(1, Math.round(source[commodity.id])) : INITIAL_GLOBAL_BASE_PRICES[commodity.id];
-    commodity.basePrice = nextBasePrice;
-    if (COMMODITY_INDEX[commodity.id]) {
-      COMMODITY_INDEX[commodity.id].basePrice = nextBasePrice;
-    }
-  }
-}
-
-function getStructuralEventIntervalSeconds(sequence) {
-  const span = BALANCE.STRUCTURAL_EVENT_MAX_SECONDS - BALANCE.STRUCTURAL_EVENT_MIN_SECONDS;
-  const offset = Math.round(span * seededFraction(`structural-event-interval:${sequence}`));
-  return BALANCE.STRUCTURAL_EVENT_MIN_SECONDS + offset;
-}
-
-function getContractDurationSeconds(distance, targetUnits) {
-  return Math.round(
-    BALANCE.CONTRACT_BASE_DURATION_SECONDS +
-      distance * BALANCE.CONTRACT_DISTANCE_DURATION_SECONDS +
-      targetUnits * BALANCE.CONTRACT_UNIT_DURATION_SECONDS
-  );
-}
-
-function getContractBounty(distance, targetUnits) {
-  return clampPositiveInt(distance * targetUnits * BALANCE.CONTRACT_BOUNTY_PER_UNIT_DISTANCE);
-}
-
-function getContractReputationReward(distance, targetUnits) {
-  return Math.max(1, Math.round(Math.sqrt(distance * targetUnits) / 2));
-}
-
-function getEnvoyLevel(xp) {
-  return Math.floor(Math.sqrt(Math.max(0, xp) / BALANCE.ENVOY_LEVEL_XP_STEP)) + 1;
-}
-
-function getEnvoyBonusRate(envoy) {
-  return Math.min(BALANCE.ENVOY_MAX_BONUS, getEnvoyLevel(envoy?.xp || 0) * BALANCE.ENVOY_BONUS_PER_LEVEL);
-}
-
-function applyEnvoyPriceModifier(price, envoy, commodityId, mode) {
-  const basePrice = Math.max(1, Math.round(price || 1));
-  if (!envoy || envoy.commodityId !== commodityId) {
-    return basePrice;
-  }
-
-  const bonus = getEnvoyBonusRate(envoy);
-  const multiplier = mode === "sell" ? 1 + bonus : 1 - bonus;
-  return clampPositiveInt(basePrice * multiplier);
-}
-
-function getEnvoyCommodityMissionUnits(envoy, outboundCommodityId, returnCommodityId, outboundUnits, returnUnits) {
-  if (!envoy) {
-    return 0;
-  }
-
-  let total = 0;
-  if (envoy.commodityId === outboundCommodityId) {
-    total += outboundUnits;
-  }
-  if (envoy.commodityId === returnCommodityId) {
-    total += returnUnits;
-  }
-  return total;
-}
-
-function createEnvoyName(sequence) {
-  const first = ENVOY_NAME_PARTS_A[sequence % ENVOY_NAME_PARTS_A.length];
-  const last = ENVOY_NAME_PARTS_B[Math.floor(sequence / ENVOY_NAME_PARTS_A.length) % ENVOY_NAME_PARTS_B.length];
-  return `${first} ${last}`;
-}
-
-function getNextEnvoyRecruitCost(state) {
-  return clampPositiveInt(
-    BALANCE.ENVOY_RECRUIT_BASE_COST * Math.pow(BALANCE.ENVOY_RECRUIT_COST_GROWTH, (state.tradeEnvoys || []).length)
-  );
-}
-
-function getBaseMarketTierIndex(system, commodityId) {
-  const basePrice = COMMODITY_INDEX[commodityId]?.basePrice;
-  const localBasePrice = system?.basePrices?.[commodityId];
-  if (!Number.isFinite(basePrice) || !Number.isFinite(localBasePrice) || basePrice <= 0) {
-    return 2;
-  }
-  const pressure = system.marketPressure?.[commodityId] || 0;
-  const ratio = (localBasePrice * (1 + pressure)) / basePrice;
-  return MARKET_TIER_DEFS.indexOf(getCommodityMarketLevel({ prices: { [commodityId]: localBasePrice * (1 + pressure) } }, commodityId));
-}
-
-function getCommodityEventShift(state, systemId, commodityId) {
-  const events = state.marketEvents || [];
-  return clamp(
-    events.reduce((sum, event) => {
-      if (event.systemId === systemId && event.commodityId === commodityId) {
-        return sum + event.direction;
-      }
-      return sum;
-    }, 0),
-    -1,
-    1
-  );
-}
-
-function getCommodityPermanentShift(system, commodityId) {
-  if (!system?.permanentTierShifts || !Number.isFinite(system.permanentTierShifts[commodityId])) {
-    return 0;
-  }
-  return system.permanentTierShifts[commodityId];
-}
-
-function recomputeSystemPrices(state, system) {
-  for (const commodity of COMMODITIES) {
-    const baseTierIndex = getBaseMarketTierIndex(system, commodity.id);
-    const shiftedTierIndex = clamp(
-      baseTierIndex + getCommodityPermanentShift(system, commodity.id) + getCommodityEventShift(state, system.id, commodity.id),
-      0,
-      MARKET_TIER_DEFS.length - 1
-    );
-    const pressure = system.marketPressure[commodity.id] || 0;
-    const rawBaseRatio = (system.basePrices[commodity.id] * (1 + pressure)) / COMMODITY_INDEX[commodity.id].basePrice;
-    const ratio = shiftedTierIndex === baseTierIndex ? rawBaseRatio : MARKET_TIER_DEFS[shiftedTierIndex].targetRatio;
-    system.prices[commodity.id] = clampPositiveInt(COMMODITY_INDEX[commodity.id].basePrice * ratio);
-  }
-}
-
-function recomputeAllSystemPrices(state) {
-  for (const system of state.systems) {
-    recomputeSystemPrices(state, system);
-  }
-}
-
-function applyMarketTrade(system, commodityId, action) {
-  if (!system || !COMMODITY_INDEX[commodityId]) {
-    return;
-  }
-
-  const current = system.marketPressure[commodityId] || 0;
-  const delta =
-    action === "buy" ? BALANCE.MARKET_PRESSURE_BUY_STEP : -BALANCE.MARKET_PRESSURE_SELL_STEP;
-  const next = Math.max(-BALANCE.MARKET_PRESSURE_MAX, Math.min(BALANCE.MARKET_PRESSURE_MAX, current + delta));
-  system.marketPressure[commodityId] = next;
-}
-
-function decayMarketPressure(state, elapsedSeconds) {
-  let changed = false;
-  const safeElapsed = Math.max(1, Math.floor(elapsedSeconds || 1));
-  const decayFactor = Math.pow(BALANCE.MARKET_PRESSURE_DECAY_PER_TICK, safeElapsed);
-
-  for (const system of state.systems) {
-    let systemChanged = false;
-    for (const commodity of COMMODITIES) {
-      const id = commodity.id;
-      const current = system.marketPressure[id] || 0;
-      if (current === 0) {
-        continue;
-      }
-
-      const decayed = current * decayFactor;
-      const next = Math.abs(decayed) < BALANCE.MARKET_PRESSURE_EPSILON ? 0 : decayed;
-      if (next !== current) {
-        system.marketPressure[id] = next;
-        systemChanged = true;
-      }
-    }
-
-    if (systemChanged) {
-      changed = true;
-    }
-  }
-
-  return changed;
+  return shift;
 }
 
 function pickUniqueSystemNames(count) {
   const names = [];
   const used = new Set(["Sol Nexus"]);
-
   for (let i = 0; names.length < count; i += 1) {
-    const a = NAME_PARTS_A[i % NAME_PARTS_A.length];
-    const b = NAME_PARTS_B[Math.floor(i / NAME_PARTS_A.length) % NAME_PARTS_B.length];
-    const name = `${a} ${b}`;
+    const name = `${SYSTEM_NAME_A[i % SYSTEM_NAME_A.length]} ${SYSTEM_NAME_B[Math.floor(i / SYSTEM_NAME_A.length) % SYSTEM_NAME_B.length]}`;
     if (!used.has(name)) {
       used.add(name);
       names.push(name);
     }
   }
-
   return names;
 }
 
 function generateSystemDistanceLy(name, index) {
-  // Deterministic but irregular LY distribution with one decimal precision.
-  const min = 1.2;
-  const max = 19.8;
-  const r1 = seededFraction(`distance:a:${name}:${index}`);
-  const r2 = seededFraction(`distance:b:${index}:${name}`);
-  const r3 = seededFraction(`distance:c:${name.length}:${index * 7}`);
-  const shape = randBetween(0.72, 1.38, `distance:shape:${name}:${index}`);
-  const jitter = randBetween(-0.45, 0.45, `distance:jitter:${name}:${index}`);
-
-  const mixed = (r1 * 0.55 + r2 * 0.35 + r3 * 0.1 + (r1 - r2) * 0.15 + 1) % 1;
-  const spread = Math.pow(Math.min(1, Math.max(0, mixed)), shape);
-  const raw = min + spread * (max - min) + jitter;
-  const clamped = Math.max(min, Math.min(max, raw));
-  return Math.round(clamped * 10) / 10;
+  const r1 = seededFraction(`distance-a:${name}:${index}`);
+  const r2 = seededFraction(`distance-b:${name}:${index}`);
+  const skewed = Math.pow(r1, 0.68);
+  const mixed = clamp((skewed * 0.72) + (r2 * 0.28), 0, 1);
+  return roundTenths(1.8 + mixed * 37.4);
 }
 
-function generateSystemPrices(systemName, type) {
-  const prices = {};
-
+function createSystemPriceProfile(name, type, isHome = false) {
+  const baseTierIndex = {};
+  const priceBias = {};
   for (const commodity of COMMODITIES) {
-    let min = BALANCE.PRICE_NEUTRAL_MIN;
-    let max = BALANCE.PRICE_NEUTRAL_MAX;
-
-    if (type.high.includes(commodity.id)) {
-      min = BALANCE.PRICE_HIGH_MIN;
-      max = BALANCE.PRICE_HIGH_MAX;
-    } else if (type.low.includes(commodity.id)) {
-      min = BALANCE.PRICE_LOW_MIN;
-      max = BALANCE.PRICE_LOW_MAX;
-    }
-
-    const multiplier = randBetween(min, max, `${systemName}:${commodity.id}:mult`);
-    prices[commodity.id] = clampPositiveInt(commodity.basePrice * multiplier);
-  }
-
-  return prices;
-}
-
-function generateHomePrices() {
-  const prices = {};
-  for (const commodity of COMMODITIES) {
-    const multiplier = randBetween(
-      BALANCE.HOME_PRICE_MIN,
-      BALANCE.HOME_PRICE_MAX,
-      `home:${commodity.id}:mult`
-    );
-    prices[commodity.id] = clampPositiveInt(commodity.basePrice * multiplier);
-  }
-  return prices;
-}
-
-function createMarketEvent(system, commodityId, direction, sequence, remainingSeconds = BALANCE.MARKET_EVENT_DURATION_SECONDS) {
-  const copyPool = direction > 0 ? MARKET_EVENT_COPY[commodityId].up : MARKET_EVENT_COPY[commodityId].down;
-  const copy = copyPool[sequence % copyPool.length];
-  const levelText = direction > 0 ? "one tier higher" : "one tier lower";
-  return {
-    id: `me-${sequence}-${system.id}-${commodityId}-${direction > 0 ? "up" : "down"}`,
-    systemId: system.id,
-    commodityId,
-    direction,
-    headline: `${system.name}: ${copy.headline}`,
-    body: `${copy.body} ${COMMODITY_INDEX[commodityId].name} is trading ${levelText} for the next ${formatSeconds(BALANCE.MARKET_EVENT_DURATION_SECONDS)}.`,
-    remainingSeconds,
-    durationSeconds: BALANCE.MARKET_EVENT_DURATION_SECONDS
-  };
-}
-
-function spawnNextMarketEvent(state) {
-  const discoveredSystems = getDiscoveredSystems(state);
-  if (discoveredSystems.length === 0) {
-    return false;
-  }
-
-  const activeKeys = new Set((state.marketEvents || []).map((event) => `${event.systemId}:${event.commodityId}`));
-  const commodityIds = COMMODITIES.map((commodity) => commodity.id);
-  let event = null;
-
-  for (let attempt = 0; attempt < discoveredSystems.length * commodityIds.length * 2; attempt += 1) {
-    const sequence = state.marketEventSequence + attempt;
-    const system = discoveredSystems[sequence % discoveredSystems.length];
-    const commodityId = commodityIds[(sequence * 3 + 1) % commodityIds.length];
-    const direction = seededFraction(`market-event:${sequence}:${system.id}:${commodityId}`) >= 0.5 ? 1 : -1;
-    const key = `${system.id}:${commodityId}`;
-    if (activeKeys.has(key)) {
-      continue;
-    }
-    event = createMarketEvent(system, commodityId, direction, sequence);
-    state.marketEventSequence = sequence + 1;
-    break;
-  }
-
-  if (!event) {
-    return false;
-  }
-
-  state.marketEvents.push(event);
-  return true;
-}
-
-function initializeMarketEvents(state) {
-  state.marketEvents = [];
-  state.marketEventSequence = 0;
-  spawnNextMarketEvent(state);
-  spawnNextMarketEvent(state);
-  if (state.marketEvents[1]) {
-    state.marketEvents[1].remainingSeconds = BALANCE.MARKET_EVENT_DURATION_SECONDS - BALANCE.MARKET_EVENT_INTERVAL_SECONDS;
-  }
-  state.secondsUntilNextMarketEvent = BALANCE.MARKET_EVENT_INTERVAL_SECONDS;
-}
-
-function advanceMarketEvents(state, elapsedSeconds) {
-  let changed = false;
-  let secondsRemaining = Math.max(0, Math.floor(elapsedSeconds || 0));
-  if (secondsRemaining <= 0) {
-    return changed;
-  }
-
-  while (secondsRemaining > 0) {
-    const nextExpiry = state.marketEvents.length > 0
-      ? Math.min(...state.marketEvents.map((event) => event.remainingSeconds))
-      : Number.POSITIVE_INFINITY;
-    const nextSpawn = Math.max(1, state.secondsUntilNextMarketEvent);
-    const step = Math.max(1, Math.min(secondsRemaining, nextSpawn, nextExpiry));
-
-    for (const event of state.marketEvents) {
-      event.remainingSeconds -= step;
-    }
-    state.secondsUntilNextMarketEvent -= step;
-    secondsRemaining -= step;
-
-    const activeEvents = state.marketEvents.filter((event) => event.remainingSeconds > 0);
-    if (activeEvents.length !== state.marketEvents.length) {
-      changed = true;
-      state.marketEvents = activeEvents;
-    }
-
-    if (state.secondsUntilNextMarketEvent <= 0) {
-      changed = true;
-      spawnNextMarketEvent(state);
-      state.secondsUntilNextMarketEvent = BALANCE.MARKET_EVENT_INTERVAL_SECONDS;
-    }
-  }
-
-  return changed;
-}
-
-function pushStructuralNews(state, item) {
-  state.structuralNews.unshift(item);
-  if (state.structuralNews.length > 12) {
-    state.structuralNews.length = 12;
-  }
-}
-
-function applyPermanentSystemShift(state, system, commodityId, direction, sequence) {
-  if (!system || !COMMODITY_INDEX[commodityId]) {
-    return false;
-  }
-
-  const currentShift = getCommodityPermanentShift(system, commodityId);
-  const nextShift = clamp(currentShift + direction, -2, 2);
-  const baseTierIndex = getBaseMarketTierIndex(system, commodityId);
-  const currentTierIndex = clamp(baseTierIndex + currentShift, 0, MARKET_TIER_DEFS.length - 1);
-  const nextTierIndex = clamp(baseTierIndex + nextShift, 0, MARKET_TIER_DEFS.length - 1);
-  if (nextShift === currentShift || nextTierIndex === currentTierIndex) {
-    return false;
-  }
-
-  system.permanentTierShifts[commodityId] = nextShift;
-  const copyPool = direction > 0 ? STRUCTURAL_EVENT_COPY.system.up : STRUCTURAL_EVENT_COPY.system.down;
-  const copy = copyPool[sequence % copyPool.length];
-  const directionText = direction > 0 ? "one permanent tier higher" : "one permanent tier lower";
-  const item = {
-    id: `se-system-${sequence}-${system.id}-${commodityId}`,
-    kind: "system",
-    systemId: system.id,
-    commodityId,
-    direction,
-    headline: `${system.name}: ${copy.headline}`,
-    body: `${copy.body} ${COMMODITY_INDEX[commodityId].name} now trades ${directionText} in ${system.name}.`,
-    timestamp: nowIso()
-  };
-
-  pushStructuralNews(state, item);
-  pushLog(state, `${item.headline}. ${COMMODITY_INDEX[commodityId].name} permanently shifted in ${system.name}.`);
-  return true;
-}
-
-function applyPermanentGlobalBaseShift(state, commodityId, direction, sequence) {
-  if (!COMMODITY_INDEX[commodityId]) {
-    return false;
-  }
-
-  const multiplier = direction > 0
-    ? randBetween(1.08, 1.16, `structural-global-up:${sequence}:${commodityId}`)
-    : randBetween(0.84, 0.92, `structural-global-down:${sequence}:${commodityId}`);
-  const currentBasePrice = state.globalBasePrices[commodityId] || INITIAL_GLOBAL_BASE_PRICES[commodityId];
-  const nextBasePrice = clampPositiveInt(currentBasePrice * multiplier);
-  if (nextBasePrice === currentBasePrice) {
-    return false;
-  }
-
-  const ratio = nextBasePrice / Math.max(1, currentBasePrice);
-  state.globalBasePrices[commodityId] = nextBasePrice;
-  for (const system of state.systems) {
-    system.basePrices[commodityId] = clampPositiveInt(system.basePrices[commodityId] * ratio);
-    system.prices[commodityId] = clampPositiveInt(system.prices[commodityId] * ratio);
-  }
-  applyGlobalBasePrices(state);
-
-  const copyPool = direction > 0 ? STRUCTURAL_EVENT_COPY.global.up : STRUCTURAL_EVENT_COPY.global.down;
-  const copy = copyPool[sequence % copyPool.length];
-  const item = {
-    id: `se-global-${sequence}-${commodityId}`,
-    kind: "global",
-    systemId: null,
-    commodityId,
-    direction,
-    headline: `Galactic Market: ${copy.headline}`,
-    body: `${copy.body} ${COMMODITY_INDEX[commodityId].name} now has a permanent new galactic base price of ${formatCredits(nextBasePrice)}.`,
-    timestamp: nowIso()
-  };
-
-  pushStructuralNews(state, item);
-  pushLog(state, `${item.headline}. ${COMMODITY_INDEX[commodityId].name} base price is now ${formatCredits(nextBasePrice)}.`);
-  return true;
-}
-
-function spawnStructuralEvent(state) {
-  const sequence = state.structuralEventSequence || 0;
-  const commodityIds = COMMODITIES.map((commodity) => commodity.id);
-  const systemChance = seededFraction(`structural-event-kind:${sequence}`);
-  let changed = false;
-
-  if (systemChance < BALANCE.STRUCTURAL_EVENT_SYSTEM_CHANCE) {
-    const candidateSystems = getDiscoveredSystems(state);
-    if (candidateSystems.length > 0) {
-      for (let attempt = 0; attempt < candidateSystems.length * commodityIds.length; attempt += 1) {
-        const system = candidateSystems[(sequence + attempt) % candidateSystems.length];
-        const commodityId = commodityIds[(sequence * 5 + attempt) % commodityIds.length];
-        const direction = seededFraction(`structural-event-direction:${sequence}:${attempt}`) >= 0.5 ? 1 : -1;
-        if (applyPermanentSystemShift(state, system, commodityId, direction, sequence + attempt)) {
-          changed = true;
-          break;
-        }
+    let tier = 2;
+    if (!isHome) {
+      if (type.high.includes(commodity.id)) {
+        tier = 3;
+      } else if (type.low.includes(commodity.id)) {
+        tier = 1;
       }
     }
+    baseTierIndex[commodity.id] = tier;
+    priceBias[commodity.id] = randBetween(-0.05, 0.05, `bias:${name}:${commodity.id}`);
   }
-
-  if (!changed) {
-    const commodityId = commodityIds[sequence % commodityIds.length];
-    const direction = seededFraction(`structural-global-direction:${sequence}:${commodityId}`) >= 0.5 ? 1 : -1;
-    changed = applyPermanentGlobalBaseShift(state, commodityId, direction, sequence);
-  }
-
-  state.structuralEventSequence = sequence + 1;
-  state.secondsUntilNextStructuralEvent = getStructuralEventIntervalSeconds(state.structuralEventSequence);
-  return changed;
-}
-
-function advanceStructuralEvents(state, elapsedSeconds) {
-  let changed = false;
-  let secondsRemaining = Math.max(0, Math.floor(elapsedSeconds || 0));
-  if (secondsRemaining <= 0) {
-    return changed;
-  }
-
-  while (secondsRemaining > 0) {
-    const nextTrigger = Math.max(1, state.secondsUntilNextStructuralEvent || getStructuralEventIntervalSeconds(state.structuralEventSequence || 0));
-    const step = Math.min(secondsRemaining, nextTrigger);
-    state.secondsUntilNextStructuralEvent = nextTrigger - step;
-    secondsRemaining -= step;
-
-    if (state.secondsUntilNextStructuralEvent <= 0) {
-      if (spawnStructuralEvent(state)) {
-        changed = true;
-      }
-    }
-  }
-
-  return changed;
-}
-
-function createCorporateContract(state, system, commodityId, sequence) {
-  const copy = CONTRACT_COPY[sequence % CONTRACT_COPY.length];
-  const quantityBase = 60 + Math.round(system.distance * 5);
-  const quantityVariance = Math.round(seededFraction(`contract-qty:${sequence}:${system.id}:${commodityId}`) * 70);
-  const targetUnits = quantityBase + quantityVariance;
-  const durationSeconds = getContractDurationSeconds(system.distance, targetUnits);
-  const bounty = getContractBounty(system.distance, targetUnits);
-  const reputationReward = getContractReputationReward(system.distance, targetUnits);
-
-  return {
-    id: `cc-${sequence}-${system.id}-${commodityId}`,
-    issuer: copy.issuer,
-    headline: copy.headline,
-    body: copy.body,
-    systemId: system.id,
-    commodityId,
-    targetUnits,
-    deliveredUnits: 0,
-    remainingSeconds: durationSeconds,
-    durationSeconds,
-    bounty,
-    reputationReward,
-    createdAt: nowIso()
-  };
-}
-
-function createTradeEnvoyCandidate(state, sequence) {
-  const commodityId = COMMODITIES[sequence % COMMODITIES.length].id;
-  return {
-    id: `tec-${sequence}`,
-    name: createEnvoyName(sequence),
-    commodityId,
-    hireCost: getNextEnvoyRecruitCost(state)
-  };
-}
-
-function fillTradeEnvoyCandidates(state) {
-  if (!Array.isArray(state.tradeEnvoyCandidates)) {
-    state.tradeEnvoyCandidates = [];
-  }
-
-  const usedNames = new Set([
-    ...(state.tradeEnvoyCandidates || []).map((candidate) => candidate.name),
-    ...((state.tradeEnvoys || []).map((envoy) => envoy.name))
-  ]);
-
-  while (state.tradeEnvoyCandidates.length < 3) {
-    const sequence = state.tradeEnvoyCandidateSequence || 0;
-    const candidate = createTradeEnvoyCandidate(state, sequence);
-    state.tradeEnvoyCandidateSequence = sequence + 1;
-    if (usedNames.has(candidate.name)) {
-      continue;
-    }
-    usedNames.add(candidate.name);
-    state.tradeEnvoyCandidates.push(candidate);
-  }
-}
-
-function recruitTradeEnvoy(state, candidateId) {
-  const candidates = Array.isArray(state.tradeEnvoyCandidates) ? state.tradeEnvoyCandidates : [];
-  const candidate = candidates.find((item) => item.id === candidateId);
-  if (!candidate) {
-    return { ok: false, message: "Trade Envoy candidate not found." };
-  }
-  if (state.reputationPoints < candidate.hireCost) {
-    return { ok: false, message: `Need ${candidate.hireCost} reputation.` };
-  }
-
-  state.reputationPoints -= candidate.hireCost;
-  if (!Array.isArray(state.tradeEnvoys)) {
-    state.tradeEnvoys = [];
-  }
-  state.tradeEnvoys.push({
-    id: `te-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-    name: candidate.name,
-    commodityId: candidate.commodityId,
-    xp: 0
-  });
-  state.tradeEnvoyCandidates = candidates.filter((item) => item.id !== candidateId);
-  fillTradeEnvoyCandidates(state);
-  pushLog(state, `Trade Envoy recruited: ${candidate.name}, specialist in ${COMMODITY_INDEX[candidate.commodityId].name}.`);
-  return { ok: true };
-}
-
-function fillCorporateContracts(state) {
-  if (!Array.isArray(state.corporateContracts)) {
-    state.corporateContracts = [];
-  }
-
-  const discoveredSystems = getDiscoveredRemoteSystems(state);
-  const commodityIds = COMMODITIES.map((commodity) => commodity.id);
-
-  while (state.corporateContracts.length < BALANCE.CONTRACT_COUNT && discoveredSystems.length > 0) {
-    const usedKeys = new Set(state.corporateContracts.map((contract) => `${contract.systemId}:${contract.commodityId}`));
-    let created = null;
-
-    for (let attempt = 0; attempt < discoveredSystems.length * commodityIds.length; attempt += 1) {
-      const sequence = state.contractSequence + attempt;
-      const system = discoveredSystems[sequence % discoveredSystems.length];
-      const commodityId = commodityIds[(sequence * 7 + 3) % commodityIds.length];
-      const key = `${system.id}:${commodityId}`;
-      if (usedKeys.has(key)) {
-        continue;
-      }
-      created = createCorporateContract(state, system, commodityId, sequence);
-      state.contractSequence = sequence + 1;
-      break;
-    }
-
-    if (!created) {
-      break;
-    }
-
-    state.corporateContracts.push(created);
-  }
-}
-
-function applyCorporateContractDelivery(state, systemId, commodityId, deliveredUnits) {
-  if (!Array.isArray(state.corporateContracts) || deliveredUnits <= 0) {
-    return false;
-  }
-
-  let changed = false;
-  const completedContracts = [];
-
-  for (const contract of state.corporateContracts) {
-    if (contract.systemId !== systemId || contract.commodityId !== commodityId || contract.remainingSeconds <= 0) {
-      continue;
-    }
-
-    const unitsNeeded = Math.max(0, contract.targetUnits - contract.deliveredUnits);
-    if (unitsNeeded <= 0) {
-      continue;
-    }
-
-    const creditedUnits = Math.min(unitsNeeded, deliveredUnits);
-    contract.deliveredUnits += creditedUnits;
-    changed = true;
-
-    if (contract.deliveredUnits >= contract.targetUnits) {
-      completedContracts.push(contract.id);
-      state.credits += contract.bounty;
-      state.reputationPoints += contract.reputationReward || 0;
-      pushLog(
-        state,
-        `${contract.issuer} paid ${formatCredits(contract.bounty)} and ${contract.reputationReward || 0} reputation for completing ${COMMODITY_INDEX[contract.commodityId].name} delivery to ${findSystem(state, contract.systemId)?.name || "unknown destination"}.`
-      );
-    }
-  }
-
-  if (completedContracts.length > 0) {
-    state.corporateContracts = state.corporateContracts.filter((contract) => !completedContracts.includes(contract.id));
-    fillCorporateContracts(state);
-  }
-
-  return changed;
-}
-
-function advanceCorporateContracts(state, elapsedSeconds) {
-  let changed = false;
-  if (!Array.isArray(state.corporateContracts) || state.corporateContracts.length === 0) {
-    fillCorporateContracts(state);
-    return state.corporateContracts.length > 0;
-  }
-
-  const seconds = Math.max(0, Math.floor(elapsedSeconds || 0));
-  if (seconds <= 0) {
-    return false;
-  }
-
-  for (const contract of state.corporateContracts) {
-    contract.remainingSeconds -= seconds;
-  }
-
-  const expiredContracts = state.corporateContracts.filter((contract) => contract.remainingSeconds <= 0);
-  if (expiredContracts.length > 0) {
-    for (const contract of expiredContracts) {
-      pushLog(
-        state,
-        `${contract.issuer} contract expired for ${COMMODITY_INDEX[contract.commodityId].name} to ${findSystem(state, contract.systemId)?.name || "unknown destination"} (${contract.deliveredUnits}/${contract.targetUnits}).`
-      );
-    }
-    state.corporateContracts = state.corporateContracts.filter((contract) => contract.remainingSeconds > 0);
-    changed = true;
-  }
-
-  fillCorporateContracts(state);
-  return changed;
+  return { baseTierIndex, priceBias };
 }
 
 function createStarSystems() {
-  const remoteNames = pickUniqueSystemNames(BALANCE.REMOTE_SYSTEM_COUNT);
   const systems = [];
-  const homeBasePrices = generateHomePrices();
-
-  const homeSystem = {
+  const homeProfile = createSystemPriceProfile("Sol Nexus", { high: [], low: [] }, true);
+  systems.push({
     id: "sys-home",
     name: "Sol Nexus",
-    distance: 0,
     discovered: true,
-    typeId: "home-hub",
+    distance: 0,
     typeHigh: [],
     typeLow: [],
-    basePrices: { ...homeBasePrices },
-    permanentTierShifts: createZeroTierShiftMap(),
+    baseTierIndex: homeProfile.baseTierIndex,
+    priceBias: homeProfile.priceBias,
+    permanentTierShifts: createZeroShiftMap(),
     marketPressure: createZeroPressureMap(),
-    prices: { ...homeBasePrices }
-  };
+    prices: {}
+  });
 
-  systems.push(homeSystem);
-
+  const names = pickUniqueSystemNames(BALANCE.REMOTE_SYSTEM_COUNT);
   for (let i = 0; i < BALANCE.REMOTE_SYSTEM_COUNT; i += 1) {
-    const name = remoteNames[i];
     const type = SYSTEM_TYPES[i % SYSTEM_TYPES.length];
-    const basePrices = generateSystemPrices(name, type);
-    const distance = generateSystemDistanceLy(name, i);
-
+    const name = names[i];
+    const profile = createSystemPriceProfile(name, type, false);
     systems.push({
       id: `sys-${i + 1}`,
       name,
-      distance,
       discovered: false,
-      typeId: type.id,
+      distance: generateSystemDistanceLy(name, i),
       typeHigh: [...type.high],
       typeLow: [...type.low],
-      basePrices: { ...basePrices },
-      permanentTierShifts: createZeroTierShiftMap(),
+      baseTierIndex: profile.baseTierIndex,
+      priceBias: profile.priceBias,
+      permanentTierShifts: createZeroShiftMap(),
       marketPressure: createZeroPressureMap(),
-      prices: { ...basePrices }
+      prices: {}
     });
   }
 
-  const discoveredTargets = systems
-    .filter((s) => s.id !== "sys-home")
+  systems
+    .filter((system) => system.id !== "sys-home")
     .sort((a, b) => a.distance - b.distance)
-    .slice(0, Math.max(0, BALANCE.STARTING_DISCOVERED_COUNT - 1));
-
-  for (const system of discoveredTargets) {
-    system.discovered = true;
-  }
+    .slice(0, BALANCE.STARTING_DISCOVERED_COUNT - 1)
+    .forEach((system) => {
+      system.discovered = true;
+    });
 
   return systems;
+}
+
+function computeCommodityTier(system, commodityId, eventShift = 0) {
+  const tier = (system.baseTierIndex?.[commodityId] ?? 2) + (system.permanentTierShifts?.[commodityId] ?? 0) + eventShift;
+  return clamp(tier, 0, MARKET_TIER_DEFS.length - 1);
+}
+
+function getEventShiftForCommodity(state, systemId, commodityId) {
+  return (state.marketEvents || []).reduce((sum, event) => {
+    if (event.systemId === systemId && event.commodityId === commodityId) {
+      return sum + event.direction;
+    }
+    return sum;
+  }, 0);
+}
+
+function recomputeSystemPrices(state, system) {
+  for (const commodity of COMMODITIES) {
+    const tier = computeCommodityTier(system, commodity.id, getEventShiftForCommodity(state, system.id, commodity.id));
+    const bias = (system.priceBias?.[commodity.id] || 0) * (tier === (system.baseTierIndex?.[commodity.id] ?? 2) ? 1 : 0.4);
+    const pressure = system.marketPressure?.[commodity.id] || 0;
+    const ratio = clamp(MARKET_TIER_DEFS[tier].ratio * (1 + bias) + pressure, 0.45, 1.85);
+    system.prices[commodity.id] = clampPositiveInt((state.globalBasePrices?.[commodity.id] || GLOBAL_BASE_PRICES[commodity.id]) * ratio);
+  }
+}
+
+function recomputeAllSystemPrices(state) {
+  state.systems.forEach((system) => recomputeSystemPrices(state, system));
+}
+
+function getCommodityLevelForSystem(system, commodityId) {
+  if (!system || !COMMODITY_INDEX[commodityId]) {
+    return MARKET_TIER_DEFS[2];
+  }
+  const price = system.prices?.[commodityId];
+  const base = COMMODITY_INDEX[commodityId].basePrice || 1;
+  const ratio = price / base;
+  if (ratio >= 1.28) return MARKET_TIER_DEFS[4];
+  if (ratio >= 1.1) return MARKET_TIER_DEFS[3];
+  if (ratio <= 0.72) return MARKET_TIER_DEFS[0];
+  if (ratio <= 0.88) return MARKET_TIER_DEFS[1];
+  return MARKET_TIER_DEFS[2];
+}
+
+function renderCommodityLabel(commodityId, system) {
+  const commodity = COMMODITY_INDEX[commodityId];
+  const tier = getCommodityLevelForSystem(system, commodityId);
+  return `<span class="commodity-name"><span class="commodity-icon">${COMMODITY_ICONS[commodityId] || ""}</span>${escapeHtml(commodity.name)} <span class="commodity-tag ${tier.className}">${tier.label}</span></span>`;
+}
+
+function pushLog(state, text) {
+  state.log.unshift({ id: `log-${Date.now()}-${Math.random()}`, text, timestamp: nowIso() });
+  state.log = state.log.slice(0, BALANCE.MAX_LOG_ENTRIES);
+}
+
+function addToast(state, title, body) {
+  state.notifications.push({
+    id: `toast-${Date.now()}-${Math.random()}`,
+    title,
+    body,
+    remainingSeconds: 7
+  });
+}
+
+function buildHelpItems() {
+  return [
+    {
+      title: "Spaceport Hub",
+      body: "The home screen is a hub. Open a location card to work one part of your operation, then close it to return to the concourse."
+    },
+    {
+      title: "Corporate Contracts",
+      body: "Contracts award Credits and 1, 2, or 3 reputation XP based on difficulty. Reputation levels your station up instead of acting like a currency."
+    },
+    {
+      title: "Level Rewards",
+      body: "Most level-ups increase your merchant ship cap. Every third level automatically grants a Trade Envoy instead."
+    },
+    {
+      title: "Trade Envoys",
+      body: "Envoys improve pricing on their specialty commodities, level up from missions, and stay busy until their assigned trade mission batch returns."
+    },
+    {
+      title: "Trade Missions",
+      body: "Pick exact ships, outbound cargo, return cargo, and optionally one idle envoy. If funds are short, you can launch a partial load or finance the full mission."
+    },
+    {
+      title: "Scouting",
+      body: "Scouting reveals more systems over time. Discovery notifications summarize distance and the new market’s high and low commodities."
+    },
+    {
+      title: "Markets",
+      body: "Buying nudges local prices up, selling nudges them down, temporary news events move a commodity one tier, and structural events can permanently change a system or the galactic baseline."
+    },
+    {
+      title: "Trade Analytics",
+      body: "The Ledger Vault tracks your mission history, recent profit trend, commodity mix, and route leaders so you can spot what is actually making money."
+    }
+  ];
 }
 
 function createMerchantShips(count) {
@@ -1313,852 +662,859 @@ function createMerchantShips(count) {
   return ships;
 }
 
-function nowIso() {
-  return new Date().toISOString();
+function getInitialMarketEvents(state) {
+  const first = createMarketEvent(state, 0);
+  const second = createMarketEvent(state, 1);
+  if (second) {
+    second.remainingSeconds = Math.max(1, BALANCE.MARKET_EVENT_DURATION_SECONDS - BALANCE.MARKET_EVENT_OFFSET_SECONDS);
+  }
+  return [first, second].filter(Boolean);
 }
 
 function createNewGameState() {
   const systems = createStarSystems();
-  const merchantShips = createMerchantShips(BALANCE.STARTING_MERCHANT_SHIPS);
-
   const state = {
-    version: 1,
+    version: 2,
     credits: BALANCE.STARTING_CREDITS,
-    reputationPoints: 0,
     escrowCredits: 0,
-    cargoSize: BALANCE.CARGO_SIZE,
-    globalBasePrices: createBasePriceMap(),
-    merchantShips,
-    scoutShip: {
-      owned: false,
-      status: "none"
-    },
-    homeSystemId: "sys-home",
-    systems,
-    tradeMissions: [],
-    tradeMissionBatches: {},
-    tradeEnvoys: [],
-    tradeEnvoyCandidates: [],
-    tradeEnvoyCandidateSequence: 0,
-    upgradeMissions: [],
-    marketEvents: [],
-    marketEventSequence: 0,
-    secondsUntilNextMarketEvent: BALANCE.MARKET_EVENT_INTERVAL_SECONDS,
-    corporateContracts: [],
-    contractSequence: 0,
-    structuralNews: [],
-    structuralEventSequence: 0,
-    secondsUntilNextStructuralEvent: getStructuralEventIntervalSeconds(0),
+    playerReputationXp: 0,
+    playerLevel: 1,
+    maxMerchantShips: BALANCE.STARTING_MAX_MERCHANT_SHIPS,
+    nextEnvoyGrantIndex: 0,
+    merchantShips: createMerchantShips(BALANCE.STARTING_MERCHANT_SHIPS),
+    scoutShip: { owned: false, status: "none" },
     scoutMission: null,
     scoutMissionsLaunched: 0,
-    lastUpdatedAt: nowIso(),
-    nextMerchantShipCost: BALANCE.MERCHANT_SHIP_BASE_COST,
-    log: []
+    systems,
+    marketEvents: [],
+    marketEventSequence: 2,
+    nextMarketEventIn: BALANCE.MARKET_EVENT_OFFSET_SECONDS,
+    nextStructuralEventIn: getStructuralEventIntervalSeconds(0),
+    structuralEventSequence: 0,
+    structuralHistory: [],
+    contracts: [],
+    contractSequence: 0,
+    tradeEnvoys: [],
+    tradeMissions: [],
+    tradeMissionBatches: {},
+    upgradeMissions: [],
+    globalBasePrices: { ...GLOBAL_BASE_PRICES },
+    tradeHistory: [],
+    notifications: [],
+    log: [],
+    lastUpdatedAt: nowIso()
   };
-
-  pushLog(state, "Trading post established at Sol Nexus.");
-  pushLog(
-    state,
-    `${merchantShips.length} merchant ship ready. ${getDiscoveredSystems(state).length - 1} nearby systems charted.`
-  );
-
-  applyGlobalBasePrices(state);
-  initializeMarketEvents(state);
-  fillCorporateContracts(state);
-  fillTradeEnvoyCandidates(state);
+  state.marketEvents = getInitialMarketEvents(state);
   recomputeAllSystemPrices(state);
-
+  fillContracts(state);
+  pushLog(state, "Trading post established at Sol Nexus.");
+  addToast(state, "Sol Nexus Online", "The docks are open and your first merchant ship is ready.");
   return state;
 }
 
-function loadGameState() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      return null;
-    }
-    const parsed = JSON.parse(raw);
-    return normalizeLoadedState(parsed);
-  } catch (error) {
-    console.warn("Save load failed, creating new game", error);
-    return null;
-  }
+function getStructuralEventIntervalSeconds(sequence) {
+  const span = BALANCE.STRUCTURAL_EVENT_MAX_SECONDS - BALANCE.STRUCTURAL_EVENT_MIN_SECONDS;
+  const offset = Math.round(span * seededFraction(`structural-event:${sequence}`));
+  return BALANCE.STRUCTURAL_EVENT_MIN_SECONDS + offset;
 }
 
-function normalizeLoadedState(state) {
-  if (!state || typeof state !== "object") {
-    return null;
-  }
-
-  const rawSystems = Array.isArray(state.systems) && state.systems.length > 0 ? state.systems : createStarSystems();
-  const systems = rawSystems.map((system) => {
-    const basePrices = system.basePrices && typeof system.basePrices === "object" ? { ...system.basePrices } : { ...system.prices };
-    const permanentTierShifts =
-      system.permanentTierShifts && typeof system.permanentTierShifts === "object"
-        ? { ...createZeroTierShiftMap(), ...system.permanentTierShifts }
-        : createZeroTierShiftMap();
-    const marketPressure =
-      system.marketPressure && typeof system.marketPressure === "object"
-        ? { ...createZeroPressureMap(), ...system.marketPressure }
-        : createZeroPressureMap();
-    const normalizedSystem = {
-      ...system,
-      basePrices,
-      permanentTierShifts,
-      marketPressure,
-      prices: system.prices && typeof system.prices === "object" ? { ...system.prices } : { ...basePrices }
-    };
-    return normalizedSystem;
-  });
-  const homeSystemId = state.homeSystemId || "sys-home";
-  const homeSystem = systems.find((s) => s.id === homeSystemId) || systems[0];
-
-  function getPriceOrBase(system, commodityId) {
-    if (!system || !system.prices) {
-      return COMMODITY_INDEX[commodityId]?.basePrice || 1;
-    }
-    return system.prices[commodityId] || COMMODITY_INDEX[commodityId]?.basePrice || 1;
-  }
-
-  const normalizedTradeMissions = Array.isArray(state.tradeMissions)
-    ? state.tradeMissions.map((m, i) => {
-        const destinationSystemId = m.destinationSystemId;
-        const destination = systems.find((s) => s.id === destinationSystemId) || null;
-        const outboundCommodityId = m.outboundCommodityId || m.commodityId || COMMODITIES[0].id;
-        const returnCommodityId = m.returnCommodityId || m.commodityId || COMMODITIES[0].id;
-        const units = Number.isFinite(m.units) ? m.units : BALANCE.CARGO_SIZE;
-        const durationSeconds = Number.isFinite(m.durationSeconds)
-          ? m.durationSeconds
-          : destination
-            ? getTradeMissionDuration(destination.distance)
-            : 1;
-        const outboundBuyPrice = Number.isFinite(m.outboundBuyPrice)
-          ? m.outboundBuyPrice
-          : Number.isFinite(m.buyPrice)
-            ? m.buyPrice
-            : getPriceOrBase(homeSystem, outboundCommodityId);
-        const outboundSellPrice = Number.isFinite(m.outboundSellPrice)
-          ? m.outboundSellPrice
-          : Number.isFinite(m.sellPrice)
-            ? m.sellPrice
-            : getPriceOrBase(destination, outboundCommodityId);
-        const returnBuyPrice = Number.isFinite(m.returnBuyPrice)
-          ? m.returnBuyPrice
-          : getPriceOrBase(destination, returnCommodityId);
-        const returnSellPrice = Number.isFinite(m.returnSellPrice)
-          ? m.returnSellPrice
-          : getPriceOrBase(homeSystem, returnCommodityId);
-        const estimatedProfit = Number.isFinite(m.estimatedProfit)
-          ? m.estimatedProfit
-          : (outboundSellPrice - outboundBuyPrice + (returnSellPrice - returnBuyPrice)) * units;
-        const outboundCost = Number.isFinite(m.outboundCost) ? m.outboundCost : outboundBuyPrice * units;
-        const estimatedOutboundRevenue = Number.isFinite(m.estimatedOutboundRevenue)
-          ? m.estimatedOutboundRevenue
-          : outboundSellPrice * units;
-        const estimatedReturnCost = Number.isFinite(m.estimatedReturnCost)
-          ? m.estimatedReturnCost
-          : returnBuyPrice * units;
-        const escrowReserved = Number.isFinite(m.escrowReserved)
-          ? m.escrowReserved
-          : Number.isFinite(m.returnEscrow)
-            ? m.returnEscrow
-            : Math.max(0, estimatedReturnCost - estimatedOutboundRevenue);
-        const borrowedAmount = Number.isFinite(m.borrowedAmount) ? Math.max(0, m.borrowedAmount) : 0;
-        const financeInterest = Number.isFinite(m.financeInterest)
-          ? Math.max(0, m.financeInterest)
-          : getMissionFinanceInterest(borrowedAmount, durationSeconds);
-        const financeRepayment = Number.isFinite(m.financeRepayment)
-          ? Math.max(0, m.financeRepayment)
-          : borrowedAmount + financeInterest;
-        const financed = Boolean(m.financed) || borrowedAmount > 0;
-
-        return {
-          id: m.id || `tm-${Date.now()}-${i}`,
-          batchId: m.batchId || `legacy-${m.id || i}`,
-          shipId: m.shipId,
-          destinationSystemId,
-          outboundCommodityId,
-          returnCommodityId,
-          units,
-          outboundBuyPrice,
-          outboundSellPrice,
-          returnBuyPrice,
-          returnSellPrice,
-          estimatedOutboundRevenue,
-          estimatedReturnCost,
-          estimatedProfit,
-          outboundCost,
-          escrowReserved,
-          financed,
-          borrowedAmount,
-          financeInterest,
-          financeRepayment,
-          arrivalResolved: Boolean(m.arrivalResolved),
-          actualOutboundRevenue: Number.isFinite(m.actualOutboundRevenue) ? m.actualOutboundRevenue : 0,
-          actualReturnCost: Number.isFinite(m.actualReturnCost) ? m.actualReturnCost : 0,
-          returnUnits: Number.isFinite(m.returnUnits) ? Math.max(0, m.returnUnits) : 0,
-          remainingSeconds: Number.isFinite(m.remainingSeconds) ? Math.max(0, m.remainingSeconds) : durationSeconds,
-          durationSeconds,
-          createdAt: m.createdAt || nowIso()
-        };
-      })
-    : [];
-
-  const discoveredCount = systems.filter((s) => s.discovered).length;
-  const inferredScoutMissions = Math.max(0, discoveredCount - BALANCE.STARTING_DISCOVERED_COUNT);
-  const scoutMissionsLaunched = Number.isFinite(state.scoutMissionsLaunched)
-    ? Math.max(0, Math.floor(state.scoutMissionsLaunched))
-    : inferredScoutMissions;
-  const inferredEscrowFromMissions = normalizedTradeMissions.reduce(
-    (sum, mission) => sum + (!mission.arrivalResolved && Number.isFinite(mission.escrowReserved) ? mission.escrowReserved : 0),
-    0
-  );
-  const hasStoredEscrow = Number.isFinite(state.escrowCredits);
-  const normalizedEscrow = hasStoredEscrow ? Math.max(0, state.escrowCredits) : inferredEscrowFromMissions;
-  const baseCredits = Number.isFinite(state.credits) ? state.credits : BALANCE.STARTING_CREDITS;
-  const normalizedCredits = hasStoredEscrow ? baseCredits : baseCredits - inferredEscrowFromMissions;
-
-  const safe = {
-    version: 1,
-    credits: normalizedCredits,
-    reputationPoints: Number.isFinite(state.reputationPoints) ? Math.max(0, Math.floor(state.reputationPoints)) : 0,
-    escrowCredits: normalizedEscrow,
-    cargoSize: Number.isFinite(state.cargoSize) ? state.cargoSize : BALANCE.CARGO_SIZE,
-    globalBasePrices:
-      state.globalBasePrices && typeof state.globalBasePrices === "object"
-        ? { ...createBasePriceMap(), ...state.globalBasePrices }
-        : createBasePriceMap(),
-    merchantShips: Array.isArray(state.merchantShips)
-      ? state.merchantShips.map((s, i) => ({
-          id: s.id || `m-${i + 1}`,
-          name: (typeof s.name === "string" && s.name.trim()) || `Merchant ${i + 1}`,
-          nameColor: SHIP_NAME_COLORS.includes(s.nameColor) ? s.nameColor : SHIP_NAME_COLORS[0],
-          cargoLevel: Number.isFinite(s.cargoLevel) ? Math.max(0, Math.floor(s.cargoLevel)) : 0,
-          speedLevel: Number.isFinite(s.speedLevel) ? Math.max(0, Math.floor(s.speedLevel)) : 0,
-          status:
-            s.status === "mission" || s.status === "upgrading"
-              ? s.status
-              : "idle"
-        }))
-      : createMerchantShips(BALANCE.STARTING_MERCHANT_SHIPS),
-    scoutShip: {
-      owned: Boolean(state.scoutShip && state.scoutShip.owned),
-      status:
-        state.scoutShip && (state.scoutShip.status === "idle" || state.scoutShip.status === "mission")
-          ? state.scoutShip.status
-          : state.scoutShip && state.scoutShip.owned
-            ? "idle"
-            : "none"
-    },
-    homeSystemId,
-    systems,
-    tradeMissions: normalizedTradeMissions,
-    tradeMissionBatches:
-      state.tradeMissionBatches && typeof state.tradeMissionBatches === "object"
-        ? { ...state.tradeMissionBatches }
-        : {},
-    tradeEnvoys: Array.isArray(state.tradeEnvoys)
-      ? state.tradeEnvoys.map((envoy, index) => ({
-          id: envoy.id || `te-${index}-${Date.now()}`,
-          name: String(envoy.name || createEnvoyName(index)),
-          commodityId: envoy.commodityId || COMMODITIES[index % COMMODITIES.length].id,
-          xp: Number.isFinite(envoy.xp) ? Math.max(0, Math.floor(envoy.xp)) : 0
-        }))
-      : [],
-    tradeEnvoyCandidates: Array.isArray(state.tradeEnvoyCandidates)
-      ? state.tradeEnvoyCandidates.map((candidate, index) => ({
-          id: candidate.id || `tec-${index}-${Date.now()}`,
-          name: String(candidate.name || createEnvoyName(index)),
-          commodityId: candidate.commodityId || COMMODITIES[index % COMMODITIES.length].id,
-          hireCost: Number.isFinite(candidate.hireCost) ? Math.max(1, Math.round(candidate.hireCost)) : getNextEnvoyRecruitCost({ tradeEnvoys: Array.isArray(state.tradeEnvoys) ? state.tradeEnvoys : [] })
-        }))
-      : [],
-    tradeEnvoyCandidateSequence: Number.isFinite(state.tradeEnvoyCandidateSequence)
-      ? Math.max(0, Math.floor(state.tradeEnvoyCandidateSequence))
-      : 0,
-    upgradeMissions: Array.isArray(state.upgradeMissions)
-      ? state.upgradeMissions.map((u, i) => ({
-          id: u.id || `um-${Date.now()}-${i}`,
-          shipId: u.shipId,
-          upgradeType: u.upgradeType === "speed" ? "speed" : "cargo",
-          remainingSeconds: Number.isFinite(u.remainingSeconds) ? Math.max(0, u.remainingSeconds) : 1,
-          durationSeconds: Number.isFinite(u.durationSeconds) ? Math.max(1, u.durationSeconds) : 1,
-          cost: Number.isFinite(u.cost) ? Math.max(0, u.cost) : 0,
-          startedAt: u.startedAt || nowIso()
-        }))
-      : [],
-    marketEvents: Array.isArray(state.marketEvents)
-      ? state.marketEvents.map((event, index) => ({
-          id: event.id || `me-${index}-${Date.now()}`,
-          systemId: event.systemId,
-          commodityId: event.commodityId,
-          direction: event.direction < 0 ? -1 : 1,
-          headline: String(event.headline || ""),
-          body: String(event.body || ""),
-          remainingSeconds: Number.isFinite(event.remainingSeconds) ? Math.max(0, event.remainingSeconds) : BALANCE.MARKET_EVENT_DURATION_SECONDS,
-          durationSeconds: Number.isFinite(event.durationSeconds) ? Math.max(1, event.durationSeconds) : BALANCE.MARKET_EVENT_DURATION_SECONDS
-        }))
-      : [],
-    marketEventSequence: Number.isFinite(state.marketEventSequence) ? Math.max(0, Math.floor(state.marketEventSequence)) : 0,
-    secondsUntilNextMarketEvent: Number.isFinite(state.secondsUntilNextMarketEvent)
-      ? Math.max(1, Math.floor(state.secondsUntilNextMarketEvent))
-      : BALANCE.MARKET_EVENT_INTERVAL_SECONDS,
-    corporateContracts: Array.isArray(state.corporateContracts)
-      ? state.corporateContracts.map((contract, index) => ({
-          id: contract.id || `cc-${index}-${Date.now()}`,
-          issuer: String(contract.issuer || "Corporate Board"),
-          headline: String(contract.headline || "Priority Delivery"),
-          body: String(contract.body || ""),
-          systemId: contract.systemId,
-          commodityId: contract.commodityId || COMMODITIES[0].id,
-          targetUnits: Number.isFinite(contract.targetUnits) ? Math.max(1, Math.floor(contract.targetUnits)) : 1,
-          deliveredUnits: Number.isFinite(contract.deliveredUnits) ? Math.max(0, Math.floor(contract.deliveredUnits)) : 0,
-          remainingSeconds: Number.isFinite(contract.remainingSeconds) ? Math.max(0, Math.floor(contract.remainingSeconds)) : 1,
-          durationSeconds: Number.isFinite(contract.durationSeconds) ? Math.max(1, Math.floor(contract.durationSeconds)) : 1,
-          bounty: Number.isFinite(contract.bounty) ? Math.max(1, Math.round(contract.bounty)) : 1,
-          createdAt: contract.createdAt || nowIso()
-        }))
-      : [],
-    contractSequence: Number.isFinite(state.contractSequence) ? Math.max(0, Math.floor(state.contractSequence)) : 0,
-    structuralNews: Array.isArray(state.structuralNews)
-      ? state.structuralNews
-          .map((item, index) => ({
-            id: item.id || `se-${index}-${Date.now()}`,
-            headline: String(item.headline || ""),
-            body: String(item.body || ""),
-            timestamp: item.timestamp || nowIso(),
-            commodityId: item.commodityId,
-            systemId: item.systemId || null,
-            direction: item.direction < 0 ? -1 : 1,
-            kind: item.kind === "global" ? "global" : "system"
-          }))
-          .slice(0, 12)
-      : [],
-    structuralEventSequence: Number.isFinite(state.structuralEventSequence) ? Math.max(0, Math.floor(state.structuralEventSequence)) : 0,
-    secondsUntilNextStructuralEvent: Number.isFinite(state.secondsUntilNextStructuralEvent)
-      ? Math.max(1, Math.floor(state.secondsUntilNextStructuralEvent))
-      : getStructuralEventIntervalSeconds(Number.isFinite(state.structuralEventSequence) ? state.structuralEventSequence : 0),
-    scoutMission:
-      state.scoutMission && typeof state.scoutMission === "object"
-        ? {
-            id: state.scoutMission.id || `sm-${Date.now()}`,
-            targetSystemId: state.scoutMission.targetSystemId,
-            remainingSeconds: Number.isFinite(state.scoutMission.remainingSeconds)
-              ? Math.max(0, state.scoutMission.remainingSeconds)
-              : 1,
-            durationSeconds: Number.isFinite(state.scoutMission.durationSeconds)
-              ? state.scoutMission.durationSeconds
-              : 1,
-            createdAt: state.scoutMission.createdAt || nowIso()
-          }
-        : null,
-    scoutMissionsLaunched,
-    nextMerchantShipCost: Number.isFinite(state.nextMerchantShipCost)
-      ? Math.max(1, Math.round(state.nextMerchantShipCost))
-      : BALANCE.MERCHANT_SHIP_BASE_COST,
-    lastUpdatedAt: typeof state.lastUpdatedAt === "string" ? state.lastUpdatedAt : nowIso(),
-    log: Array.isArray(state.log)
-      ? state.log
-          .map((entry, idx) => ({
-            id: entry.id || `log-${idx}-${Date.now()}`,
-            text: String(entry.text || ""),
-            timestamp: entry.timestamp || nowIso()
-          }))
-          .filter((entry) => entry.text)
-          .slice(0, BALANCE.MAX_LOG_ENTRIES)
-      : []
-  };
-
-  if (!safe.tradeMissionBatches || typeof safe.tradeMissionBatches !== "object") {
-    safe.tradeMissionBatches = {};
-  }
-  for (const mission of safe.tradeMissions) {
-    const batchId = mission.batchId || mission.id;
-    if (!safe.tradeMissionBatches[batchId]) {
-      safe.tradeMissionBatches[batchId] = {
-        batchId,
-        destinationSystemId: mission.destinationSystemId,
-        outboundCommodityId: mission.outboundCommodityId,
-        returnCommodityId: mission.returnCommodityId,
-        totalShips: 0,
-        completedShips: 0,
-        totalProfit: 0,
-        totalFinanceRepayment: 0,
-        totalFinanceInterest: 0,
-        partialReturnShips: 0
-      };
-    }
-    safe.tradeMissionBatches[batchId].totalShips += 1;
-  }
-
-  // Repair ship states to match active missions.
-  const shipsInMission = new Set(safe.tradeMissions.map((m) => m.shipId));
-  const shipsUpgrading = new Set(safe.upgradeMissions.map((u) => u.shipId));
-  safe.merchantShips = safe.merchantShips.map((ship) => ({
-    ...ship,
-    status: shipsInMission.has(ship.id) ? "mission" : shipsUpgrading.has(ship.id) ? "upgrading" : "idle"
-  }));
-
-  if (safe.scoutShip.owned) {
-    safe.scoutShip.status = safe.scoutMission ? "mission" : "idle";
-  } else {
-    safe.scoutShip.status = "none";
-    safe.scoutMission = null;
-  }
-
-  if (safe.marketEvents.length === 0) {
-    initializeMarketEvents(safe);
-  }
-  fillCorporateContracts(safe);
-  fillTradeEnvoyCandidates(safe);
-  applyGlobalBasePrices(safe);
-  recomputeAllSystemPrices(safe);
-
-  return safe;
-}
-
-function saveGameState(state) {
-  state.lastUpdatedAt = nowIso();
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+function findSystem(state, id) {
+  return state.systems.find((system) => system.id === id) || null;
 }
 
 function getHomeSystem(state) {
-  return state.systems.find((s) => s.id === state.homeSystemId);
+  return findSystem(state, "sys-home");
 }
 
 function getDiscoveredSystems(state) {
-  return state.systems.filter((s) => s.discovered);
+  return state.systems.filter((system) => system.discovered);
+}
+
+function getRemoteSystems(state) {
+  return state.systems.filter((system) => system.id !== "sys-home");
 }
 
 function getDiscoveredRemoteSystems(state) {
-  return state.systems
-    .filter((s) => s.discovered && s.id !== state.homeSystemId)
-    .sort((a, b) => a.distance - b.distance);
+  return getRemoteSystems(state).filter((system) => system.discovered);
+}
+
+function getUndiscoveredSystems(state) {
+  return getRemoteSystems(state).filter((system) => !system.discovered);
+}
+
+function findMerchantShip(state, shipId) {
+  return state.merchantShips.find((ship) => ship.id === shipId) || null;
+}
+
+function findTradeEnvoy(state, envoyId) {
+  return state.tradeEnvoys.find((envoy) => envoy.id === envoyId) || null;
 }
 
 function getIdleMerchantShips(state) {
   return state.merchantShips.filter((ship) => ship.status === "idle");
 }
 
-function getUndiscoveredSystems(state) {
-  return state.systems.filter((s) => !s.discovered);
+function getIdleTradeEnvoys(state) {
+  return state.tradeEnvoys.filter((envoy) => envoy.status === "idle");
 }
 
-function findSystem(state, id) {
-  return state.systems.find((s) => s.id === id) || null;
+function getShipDisplayName(ship) {
+  return ship?.name || ship?.id?.toUpperCase() || "Ship";
 }
 
-function findMerchantShip(state, shipId) {
-  return state.merchantShips.find((s) => s.id === shipId) || null;
+function getCommoditySpecialtyMatch(envoy, commodityId) {
+  return envoy && Array.isArray(envoy.specialtyCommodityIds) && envoy.specialtyCommodityIds.includes(commodityId);
 }
 
-function pushLog(state, text) {
-  state.log.unshift({
-    id: `log-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
-    text,
-    timestamp: nowIso()
-  });
-  if (state.log.length > BALANCE.MAX_LOG_ENTRIES) {
-    state.log.length = BALANCE.MAX_LOG_ENTRIES;
+function applyEnvoyPriceModifier(price, envoy, commodityId, mode) {
+  if (!envoy || !getCommoditySpecialtyMatch(envoy, commodityId)) {
+    return Math.max(1, Math.round(price));
   }
+  const multiplier = mode === "sell" ? 1 + getTradeEnvoyBonusRate(envoy) : 1 - getTradeEnvoyBonusRate(envoy);
+  return Math.max(1, Math.round(price * multiplier));
 }
 
-function canLaunchTrade(state) {
-  return getIdleMerchantShips(state).length > 0;
+function getEnvoyMissionUnits(envoy, outboundCommodityId, returnCommodityId, outboundUnits, returnUnits) {
+  if (!envoy) {
+    return 0;
+  }
+  let total = 0;
+  if (getCommoditySpecialtyMatch(envoy, outboundCommodityId)) {
+    total += outboundUnits;
+  }
+  if (getCommoditySpecialtyMatch(envoy, returnCommodityId)) {
+    total += returnUnits;
+  }
+  return total;
 }
 
-function launchTradeMission(state, destinationSystemId, outboundCommodityId, returnCommodityId, shipIds, options = {}) {
-  const destination = findSystem(state, destinationSystemId);
-  const home = getHomeSystem(state);
-  const idleShips = getIdleMerchantShips(state);
-  const requestedShipIds = Array.isArray(shipIds) ? shipIds : [];
-  const allowPartialLoad = Boolean(options.allowPartialLoad);
-  const useFinancing = Boolean(options.useFinancing);
-  const envoy = options.envoyId ? findTradeEnvoy(state, options.envoyId) : null;
+function getEnvoySpecialtyLabel(envoy) {
+  return envoy.specialtyCommodityIds.map((id) => COMMODITY_INDEX[id].name).join(" / ");
+}
 
-  if (!destination || destination.id === state.homeSystemId) {
-    return { ok: false, message: "Invalid destination." };
-  }
-  if (!destination.discovered) {
-    return { ok: false, message: "Destination is not discovered." };
-  }
-  if (!COMMODITY_INDEX[outboundCommodityId] || !COMMODITY_INDEX[returnCommodityId]) {
-    return { ok: false, message: "Invalid commodity selection." };
-  }
-  if (idleShips.length === 0) {
-    return { ok: false, message: "No idle merchant ships." };
-  }
-
-  const idleShipMap = new Map(idleShips.map((ship) => [ship.id, ship]));
-  const selectedShips = requestedShipIds
-    .map((shipId) => idleShipMap.get(shipId))
-    .filter(Boolean);
-
-  if (selectedShips.length === 0) {
-    return { ok: false, message: "Select at least one idle merchant ship." };
-  }
-  if (selectedShips.length !== requestedShipIds.length) {
-    return { ok: false, message: "One or more selected ships are unavailable." };
-  }
-
-  const outboundBuyPrice = applyEnvoyPriceModifier(home.prices[outboundCommodityId], envoy, outboundCommodityId, "buy");
-  const outboundSellPrice = applyEnvoyPriceModifier(destination.prices[outboundCommodityId], envoy, outboundCommodityId, "sell");
-  const returnBuyPrice = applyEnvoyPriceModifier(destination.prices[returnCommodityId], envoy, returnCommodityId, "buy");
-  const returnSellPrice = applyEnvoyPriceModifier(home.prices[returnCommodityId], envoy, returnCommodityId, "sell");
-  const loadPlan = buildTradeLoadPlan(
-    state,
-    selectedShips,
-    destination.distance,
-    outboundBuyPrice,
-    outboundSellPrice,
-    returnBuyPrice,
-    returnSellPrice,
-    state.credits,
-    allowPartialLoad
-  );
-  const launchPlans = loadPlan.plans.map((plan, idx) => ({ ...plan, idSuffix: idx }));
-  const totalLaunchCost = loadPlan.totalUpfrontCost;
-  const totalEscrow = launchPlans.reduce((sum, plan) => sum + plan.escrowReserved, 0);
-
-  if (launchPlans.length === 0) {
-    return { ok: false, message: "Insufficient credits for even a partial load." };
-  }
-
-  const isPartialLoad = launchPlans.some((plan) => plan.units < plan.capacityUnits);
-
-  if (!useFinancing && state.credits < totalLaunchCost) {
-    return {
-      ok: false,
-      message: `Need ${formatCredits(totalLaunchCost)} for the selected load.`
-    };
-  }
-
-  const borrowedAmount = useFinancing ? Math.max(0, totalLaunchCost - state.credits) : 0;
-  const cashContribution = totalLaunchCost - borrowedAmount;
-  const missionBatchId = options.batchId || `batch-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-
-  state.tradeMissionBatches[missionBatchId] = {
-    batchId: missionBatchId,
-    destinationSystemId,
-    outboundCommodityId,
-    returnCommodityId,
-    envoyId: envoy?.id || null,
-    totalShips: launchPlans.length,
-    completedShips: 0,
-    totalProfit: 0,
-    totalFinanceRepayment: 0,
-    totalFinanceInterest: 0,
-    partialReturnShips: 0,
-    envoyCommodityUnits: 0
-  };
-
-  state.credits -= cashContribution;
-  state.escrowCredits += totalEscrow;
-
-  const createdMissions = [];
-
-  for (const plan of launchPlans) {
-    const {
-      ship,
-      units,
-      capacityUnits,
-      outboundCost,
-      escrowReserved,
-      estimatedOutboundRevenue,
-      estimatedReturnCost,
-      durationSeconds,
-      estimatedProfit,
-      idSuffix
-    } = plan;
-    applyMarketTrade(home, outboundCommodityId, "buy");
-    ship.status = "mission";
-
-    const mission = {
-      id: `tm-${Date.now()}-${Math.floor(Math.random() * 1000)}-${idSuffix}`,
-      batchId: missionBatchId,
-      shipId: ship.id,
-      destinationSystemId,
-      outboundCommodityId,
-      returnCommodityId,
-      units,
-      capacityUnits,
-      outboundBuyPrice,
-      outboundSellPrice,
-      returnBuyPrice,
-      returnSellPrice,
-      envoyId: envoy?.id || null,
-      estimatedOutboundRevenue,
-      estimatedReturnCost,
-      estimatedProfit,
-      outboundCost,
-      escrowReserved,
-      financed: useFinancing,
-      borrowedAmount: 0,
-      financeInterest: 0,
-      financeRepayment: 0,
-      arrivalResolved: false,
-      actualOutboundRevenue: 0,
-      actualReturnCost: 0,
-      returnUnits: 0,
-      remainingSeconds: durationSeconds,
-      durationSeconds,
-      createdAt: nowIso()
-    };
-
-    if (useFinancing) {
-      const missionBorrowedAmount = Math.round((borrowedAmount * plan.upfrontCost) / Math.max(1, totalLaunchCost));
-      mission.borrowedAmount = missionBorrowedAmount;
-      mission.financeInterest = getMissionFinanceInterest(missionBorrowedAmount, durationSeconds);
-      mission.financeRepayment = mission.borrowedAmount + mission.financeInterest;
-      mission.estimatedProfit -= mission.financeInterest;
+function awardLevelRewards(state, previousLevel, newLevel) {
+  for (let level = previousLevel + 1; level <= newLevel; level += 1) {
+    if (level % 3 === 0) {
+      const granted = grantNextTradeEnvoy(state);
+      if (granted) {
+        addToast(state, "Trade Envoy Granted", `${granted.name} joined your roster with a ${getEnvoySpecialtyLabel(granted)} specialty.`);
+        pushLog(state, `${granted.name} joined your Trade Envoys roster (${getEnvoySpecialtyLabel(granted)}).`);
+      } else {
+        state.maxMerchantShips += 1;
+        addToast(state, "Level Reward", "Envoy grants are exhausted. Your merchant ship cap increased instead.");
+      }
+    } else {
+      state.maxMerchantShips += 1;
+      addToast(state, "Ship Cap Increased", `Level ${level} unlocked room for one more merchant ship.`);
+      pushLog(state, `Level ${level} increased max merchant ships to ${state.maxMerchantShips}.`);
     }
-
-    state.tradeMissions.push(mission);
-    createdMissions.push(mission);
   }
-  if (useFinancing && createdMissions.length > 0) {
-    const plannedBorrowed = createdMissions.reduce((sum, mission) => sum + mission.borrowedAmount, 0);
-    const borrowDelta = borrowedAmount - plannedBorrowed;
-    if (borrowDelta !== 0) {
-      const lastMission = createdMissions[createdMissions.length - 1];
-      if (lastMission) {
-        const previousInterest = lastMission.financeInterest;
-        lastMission.borrowedAmount += borrowDelta;
-        lastMission.financeInterest = getMissionFinanceInterest(lastMission.borrowedAmount, lastMission.durationSeconds);
-        lastMission.financeRepayment = lastMission.borrowedAmount + lastMission.financeInterest;
-        lastMission.estimatedProfit -= lastMission.financeInterest - previousInterest;
+}
+
+function addReputationXp(state, amount, reason) {
+  const gain = Math.max(0, Math.floor(amount));
+  if (gain <= 0) {
+    return;
+  }
+  const previousLevel = state.playerLevel;
+  state.playerReputationXp += gain;
+  state.playerLevel = getLevelForReputation(state.playerReputationXp);
+  if (state.playerLevel > previousLevel) {
+    addToast(state, "Level Up", `Your trading post reached level ${state.playerLevel}. ${reason}`);
+    pushLog(state, `Trading post reached level ${state.playerLevel}.`);
+    awardLevelRewards(state, previousLevel, state.playerLevel);
+    state.maxMerchantShips = Math.max(state.maxMerchantShips, getDerivedMaxMerchantShips(state.playerLevel, state.merchantShips.length));
+  }
+}
+
+function grantNextTradeEnvoy(state) {
+  const blueprint = ENVOY_BLUEPRINTS[state.nextEnvoyGrantIndex];
+  if (!blueprint) {
+    return null;
+  }
+  const firstName = ENVOY_FIRST_NAMES[state.nextEnvoyGrantIndex];
+  const lastName = ENVOY_LAST_NAMES[state.nextEnvoyGrantIndex];
+  if (!firstName || !lastName) {
+    return null;
+  }
+  const envoy = {
+    id: `envoy-${state.nextEnvoyGrantIndex + 1}`,
+    name: `${firstName} ${lastName}`,
+    specialtyCommodityIds: [...blueprint.specialtyCommodityIds],
+    xp: 0,
+    status: "idle",
+    assignedBatchId: null
+  };
+  state.tradeEnvoys.push(envoy);
+  state.nextEnvoyGrantIndex += 1;
+  return envoy;
+}
+
+function getContractDifficulty(system, sequence) {
+  const burden = system.distance + (sequence % 3) * 4 + seededFraction(`contract-burden:${system.id}:${sequence}`) * 3;
+  if (burden >= 26) return 3;
+  if (burden >= 14) return 2;
+  return 1;
+}
+
+function createCorporateContract(state, sequence) {
+  const systems = getDiscoveredRemoteSystems(state).slice().sort((a, b) => a.distance - b.distance);
+  if (systems.length === 0) {
+    return null;
+  }
+  const system = systems[sequence % systems.length];
+  const difficulty = getContractDifficulty(system, sequence);
+  const commodityId = COMMODITIES[(sequence * 3 + Math.floor(seededFraction(`contract-c:${sequence}`) * COMMODITIES.length)) % COMMODITIES.length].id;
+  const quantityBase = difficulty === 1 ? 30 : difficulty === 2 ? 55 : 85;
+  const quantityVariance = difficulty === 1 ? 16 : difficulty === 2 ? 28 : 42;
+  const targetUnits = quantityBase + Math.round(seededFraction(`contract-q:${sequence}:${system.id}`) * quantityVariance);
+  const durationSeconds = Math.round(
+    BALANCE.CONTRACT_BASE_DEADLINE_SECONDS[difficulty] +
+    system.distance * BALANCE.CONTRACT_DEADLINE_DISTANCE_SECONDS[difficulty] +
+    targetUnits * BALANCE.CONTRACT_DEADLINE_UNIT_SECONDS[difficulty]
+  );
+  const bounty = clampPositiveInt(system.distance * targetUnits * BALANCE.CONTRACT_BOUNTY_PER_UNIT_DISTANCE * BALANCE.CONTRACT_DIFFICULTY_MULTIPLIER[difficulty]);
+  const copyIndex = sequence % CONTRACT_ISSUERS.length;
+  return {
+    id: `contract-${Date.now()}-${sequence}`,
+    issuer: CONTRACT_ISSUERS[copyIndex],
+    headline: CONTRACT_HEADLINES[sequence % CONTRACT_HEADLINES.length],
+    body: CONTRACT_BODIES[sequence % CONTRACT_BODIES.length],
+    difficulty,
+    reputationReward: difficulty,
+    systemId: system.id,
+    commodityId,
+    targetUnits,
+    deliveredUnits: 0,
+    remainingSeconds: durationSeconds,
+    durationSeconds,
+    bounty,
+    createdAt: nowIso()
+  };
+}
+
+function fillContracts(state) {
+  const used = new Set((state.contracts || []).map((item) => `${item.systemId}:${item.commodityId}`));
+  while (state.contracts.length < BALANCE.CONTRACT_COUNT) {
+    const contract = createCorporateContract(state, state.contractSequence || 0);
+    state.contractSequence = (state.contractSequence || 0) + 1;
+    if (!contract) break;
+    const key = `${contract.systemId}:${contract.commodityId}`;
+    if (used.has(key)) {
+      continue;
+    }
+    used.add(key);
+    state.contracts.push(contract);
+  }
+}
+
+function applyCorporateContractDelivery(state, systemId, commodityId, units) {
+  if (units <= 0) {
+    return 0;
+  }
+  let deliveredTotal = 0;
+  const completed = [];
+  for (const contract of state.contracts) {
+    if (contract.systemId !== systemId || contract.commodityId !== commodityId || contract.remainingSeconds <= 0) {
+      continue;
+    }
+    const need = Math.max(0, contract.targetUnits - contract.deliveredUnits);
+    if (need <= 0) {
+      continue;
+    }
+    const credit = Math.min(need, units - deliveredTotal);
+    if (credit <= 0) {
+      continue;
+    }
+    contract.deliveredUnits += credit;
+    deliveredTotal += credit;
+    if (contract.deliveredUnits >= contract.targetUnits) {
+      completed.push(contract);
+    }
+    if (deliveredTotal >= units) {
+      break;
+    }
+  }
+
+  if (completed.length > 0) {
+    for (const contract of completed) {
+      const destination = findSystem(state, contract.systemId);
+      state.credits += contract.bounty;
+      addReputationXp(state, contract.reputationReward, "Corporate contracts are raising your standing.");
+      addToast(state, "Contract Fulfilled", `${contract.issuer} paid ${formatCredits(contract.bounty)} for ${COMMODITY_INDEX[contract.commodityId].name} delivered to ${destination?.name || "unknown destination"}.`);
+      pushLog(state, `${contract.issuer} contract fulfilled at ${destination?.name || "unknown destination"}: ${formatCredits(contract.bounty)} and ${contract.reputationReward} reputation earned.`);
+    }
+    const doneIds = new Set(completed.map((item) => item.id));
+    state.contracts = state.contracts.filter((item) => !doneIds.has(item.id));
+    fillContracts(state);
+  }
+  return deliveredTotal;
+}
+
+function advanceContracts(state, seconds) {
+  let changed = false;
+  for (const contract of state.contracts) {
+    contract.remainingSeconds -= seconds;
+  }
+  const expired = state.contracts.filter((contract) => contract.remainingSeconds <= 0);
+  if (expired.length > 0) {
+    changed = true;
+    for (const contract of expired) {
+      const destination = findSystem(state, contract.systemId);
+      pushLog(state, `${contract.issuer} contract expired for ${COMMODITY_INDEX[contract.commodityId].name} to ${destination?.name || "unknown destination"} (${contract.deliveredUnits}/${contract.targetUnits}).`);
+    }
+    state.contracts = state.contracts.filter((contract) => contract.remainingSeconds > 0);
+    fillContracts(state);
+  }
+  return changed;
+}
+
+function createMarketEvent(state, sequence) {
+  const systems = getDiscoveredRemoteSystems(state);
+  if (systems.length === 0) {
+    return null;
+  }
+  const system = systems[Math.floor(seededFraction(`event-system:${sequence}`) * systems.length) % systems.length];
+  const commodity = COMMODITIES[Math.floor(seededFraction(`event-commodity:${sequence}`) * COMMODITIES.length) % COMMODITIES.length];
+  const direction = seededFraction(`event-direction:${sequence}`) > 0.5 ? 1 : -1;
+  const copyPool = MARKET_EVENT_COPY[commodity.id][direction > 0 ? "up" : "down"];
+  const copy = copyPool[sequence % copyPool.length];
+  return {
+    id: `market-event-${sequence}`,
+    systemId: system.id,
+    commodityId: commodity.id,
+    direction,
+    headline: copy.headline,
+    body: copy.body,
+    remainingSeconds: BALANCE.MARKET_EVENT_DURATION_SECONDS,
+    startedAt: nowIso()
+  };
+}
+
+function advanceMarketEvents(state, seconds) {
+  let changed = false;
+  state.marketEvents.forEach((event) => {
+    event.remainingSeconds -= seconds;
+  });
+  const activeEvents = state.marketEvents.filter((event) => event.remainingSeconds > 0);
+  if (activeEvents.length !== state.marketEvents.length) {
+    changed = true;
+    state.marketEvents = activeEvents;
+  }
+  state.nextMarketEventIn -= seconds;
+  while (state.nextMarketEventIn <= 0) {
+    const sequence = (state.marketEventSequence || 0);
+    const event = createMarketEvent(state, sequence);
+    state.marketEventSequence = sequence + 1;
+    state.nextMarketEventIn += BALANCE.MARKET_EVENT_OFFSET_SECONDS;
+    if (event) {
+      state.marketEvents.push(event);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function createStructuralEvent(state) {
+  const discovered = getDiscoveredRemoteSystems(state);
+  const sequence = state.structuralEventSequence || 0;
+  const systemChance = seededFraction(`structural-kind:${sequence}`);
+  if (systemChance < 0.9 && discovered.length > 0) {
+    const system = discovered[Math.floor(seededFraction(`structural-system:${sequence}`) * discovered.length) % discovered.length];
+    const commodity = COMMODITIES[Math.floor(seededFraction(`structural-commodity:${sequence}`) * COMMODITIES.length) % COMMODITIES.length];
+    const currentShift = system.permanentTierShifts[commodity.id] || 0;
+    let direction = seededFraction(`structural-dir:${sequence}`) > 0.5 ? 1 : -1;
+    const baseTier = system.baseTierIndex[commodity.id] ?? 2;
+    if (baseTier + currentShift + direction < 0 || baseTier + currentShift + direction > 4) {
+      direction *= -1;
+    }
+    if (baseTier + currentShift + direction < 0 || baseTier + currentShift + direction > 4) {
+      direction = 0;
+    }
+    if (direction !== 0) {
+      system.permanentTierShifts[commodity.id] = currentShift + direction;
+      const copyPool = STRUCTURAL_EVENT_COPY.system[direction > 0 ? "up" : "down"];
+      const copy = copyPool[sequence % copyPool.length];
+      return {
+        id: `struct-${sequence}`,
+        type: "system",
+        systemId: system.id,
+        commodityId: commodity.id,
+        direction,
+        headline: copy.headline,
+        body: copy.body,
+        timestamp: nowIso()
+      };
+    }
+  }
+
+  const commodity = COMMODITIES[Math.floor(seededFraction(`structural-global:${sequence}`) * COMMODITIES.length) % COMMODITIES.length];
+  const direction = seededFraction(`structural-global-dir:${sequence}`) > 0.5 ? 1 : -1;
+  const current = state.globalBasePrices[commodity.id] || GLOBAL_BASE_PRICES[commodity.id];
+  const next = Math.max(1, Math.round(current * (1 + direction * BALANCE.GLOBAL_BASE_SHIFT_PERCENT)));
+  state.globalBasePrices[commodity.id] = next;
+  COMMODITY_INDEX[commodity.id].basePrice = next;
+  const copyPool = STRUCTURAL_EVENT_COPY.global[direction > 0 ? "up" : "down"];
+  const copy = copyPool[sequence % copyPool.length];
+  return {
+    id: `struct-${sequence}`,
+    type: "global",
+    systemId: null,
+    commodityId: commodity.id,
+    direction,
+    headline: copy.headline,
+    body: copy.body,
+    timestamp: nowIso()
+  };
+}
+
+function advanceStructuralEvents(state, seconds) {
+  let changed = false;
+  state.nextStructuralEventIn -= seconds;
+  while (state.nextStructuralEventIn <= 0) {
+    const event = createStructuralEvent(state);
+    state.structuralEventSequence = (state.structuralEventSequence || 0) + 1;
+    state.nextStructuralEventIn += getStructuralEventIntervalSeconds(state.structuralEventSequence);
+    if (event) {
+      state.structuralHistory.unshift(event);
+      state.structuralHistory = state.structuralHistory.slice(0, 80);
+      addToast(state, event.type === "global" ? "Permanent Global Shift" : "Permanent Market Shift", `${event.headline}: ${COMMODITY_INDEX[event.commodityId].name}${event.systemId ? ` in ${findSystem(state, event.systemId)?.name || "unknown"}` : " across the network"}.`);
+      pushLog(state, `${event.type === "global" ? "Global" : `${findSystem(state, event.systemId)?.name || "Unknown"}`} permanent shift: ${event.headline} (${COMMODITY_INDEX[event.commodityId].name}).`);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function applyMarketPressure(system, commodityId, action) {
+  if (!system || !system.marketPressure || !(commodityId in system.marketPressure)) {
+    return;
+  }
+  const current = system.marketPressure[commodityId] || 0;
+  const delta = action === "buy" ? BALANCE.MARKET_PRESSURE_STEP : -BALANCE.MARKET_PRESSURE_STEP;
+  system.marketPressure[commodityId] = clamp(current + delta, -BALANCE.MARKET_PRESSURE_MAX, BALANCE.MARKET_PRESSURE_MAX);
+}
+
+function decayMarketPressure(state, seconds) {
+  const factor = Math.pow(BALANCE.MARKET_PRESSURE_DECAY_PER_SECOND, seconds);
+  let changed = false;
+  for (const system of state.systems) {
+    for (const commodity of COMMODITIES) {
+      const next = (system.marketPressure[commodity.id] || 0) * factor;
+      if (Math.abs(next) < 0.0001) {
+        if (system.marketPressure[commodity.id] !== 0) {
+          system.marketPressure[commodity.id] = 0;
+          changed = true;
+        }
+      } else if (Math.abs(next - system.marketPressure[commodity.id]) > 0.0001) {
+        system.marketPressure[commodity.id] = next;
+        changed = true;
       }
     }
   }
+  return changed;
+}
+
+function getRouteStats(state, system, envoy = null) {
+  const home = getHomeSystem(state);
+  let bestOutbound = null;
+  let bestReturn = null;
+  for (const commodity of COMMODITIES) {
+    const homeBuy = applyEnvoyPriceModifier(home.prices[commodity.id], envoy, commodity.id, "buy");
+    const destSell = applyEnvoyPriceModifier(system.prices[commodity.id], envoy, commodity.id, "sell");
+    const outMargin = destSell - homeBuy;
+    if (!bestOutbound || outMargin > bestOutbound.margin) {
+      bestOutbound = { commodityId: commodity.id, margin: outMargin };
+    }
+    const destBuy = applyEnvoyPriceModifier(system.prices[commodity.id], envoy, commodity.id, "buy");
+    const homeSell = applyEnvoyPriceModifier(home.prices[commodity.id], envoy, commodity.id, "sell");
+    const backMargin = homeSell - destBuy;
+    if (!bestReturn || backMargin > bestReturn.margin) {
+      bestReturn = { commodityId: commodity.id, margin: backMargin };
+    }
+  }
+  const roundTripProfit = (bestOutbound.margin + bestReturn.margin) * BALANCE.BASE_CARGO_SIZE;
+  const profitPerDistance = roundTripProfit / Math.max(1, system.distance);
+  return { bestOutbound, bestReturn, roundTripProfit, profitPerDistance };
+}
+
+function getFeaturedSystems(state) {
+  const routes = getDiscoveredRemoteSystems(state).map((system) => ({ system, ...getRouteStats(state, system) }));
+  if (routes.length === 0) {
+    return [];
+  }
+  const byProfit = routes.slice().sort((a, b) => b.roundTripProfit - a.roundTripProfit || a.system.distance - b.system.distance);
+  const byEfficiency = routes.slice().sort((a, b) => b.profitPerDistance - a.profitPerDistance || a.system.distance - b.system.distance);
+  const first = byProfit[0];
+  const second = byEfficiency.find((item) => item.system.id !== first.system.id) || byEfficiency[0];
+  return [first, second].filter(Boolean);
+}
+
+function createTradeLoadPlan(state, ships, system, outboundCommodityId, returnCommodityId, envoy, availableCredits, allowPartial) {
+  const home = getHomeSystem(state);
+  const outboundBuyPrice = applyEnvoyPriceModifier(home.prices[outboundCommodityId], envoy, outboundCommodityId, "buy");
+  const outboundSellEstimate = applyEnvoyPriceModifier(system.prices[outboundCommodityId], envoy, outboundCommodityId, "sell");
+  const returnBuyEstimate = applyEnvoyPriceModifier(system.prices[returnCommodityId], envoy, returnCommodityId, "buy");
+  const returnSellEstimate = applyEnvoyPriceModifier(home.prices[returnCommodityId], envoy, returnCommodityId, "sell");
+  const escrowPerUnit = getTradeEscrowPerUnit(outboundSellEstimate, returnBuyEstimate);
+  const perUnitUpfront = outboundBuyPrice + escrowPerUnit;
+  const totalCapacity = ships.reduce((sum, ship) => sum + getShipCargoUnits(ship), 0);
+  const affordableUnits = perUnitUpfront > 0 ? Math.min(totalCapacity, Math.floor(availableCredits / perUnitUpfront)) : totalCapacity;
+  const targetUnits = allowPartial ? affordableUnits : totalCapacity;
+
+  let remainingUnits = targetUnits;
+  const plans = [];
+  ships.forEach((ship) => {
+    const capacity = getShipCargoUnits(ship);
+    const units = Math.min(capacity, remainingUnits);
+    remainingUnits -= units;
+    if (units <= 0) {
+      return;
+    }
+    const outboundCost = outboundBuyPrice * units;
+    const estimatedOutboundRevenue = outboundSellEstimate * units;
+    const estimatedReturnCost = returnBuyEstimate * units;
+    const escrowReserved = escrowPerUnit * units;
+    const durationSeconds = getTradeDurationForShip(system.distance, ship);
+    plans.push({
+      ship,
+      units,
+      capacity,
+      outboundCost,
+      estimatedOutboundRevenue,
+      estimatedReturnCost,
+      escrowReserved,
+      durationSeconds,
+      upfrontCost: outboundCost + escrowReserved,
+      estimatedProfit: (outboundSellEstimate - outboundBuyPrice + returnSellEstimate - returnBuyEstimate) * units
+    });
+  });
+
+  const totalUpfrontCost = plans.reduce((sum, plan) => sum + plan.upfrontCost, 0);
+  const totalEstimatedOutboundRevenue = plans.reduce((sum, plan) => sum + plan.estimatedOutboundRevenue, 0);
+  const totalEstimatedReturnCost = plans.reduce((sum, plan) => sum + plan.estimatedReturnCost, 0);
+  const totalEstimatedProfit = plans.reduce((sum, plan) => sum + plan.estimatedProfit, 0);
+
+  return {
+    plans,
+    totalCapacity,
+    affordableUnits,
+    loadedUnits: plans.reduce((sum, plan) => sum + plan.units, 0),
+    totalUpfrontCost,
+    totalEstimatedOutboundRevenue,
+    totalEstimatedReturnCost,
+    totalEstimatedProfit,
+    outboundBuyPrice,
+    outboundSellEstimate,
+    returnBuyEstimate,
+    returnSellEstimate
+  };
+}
+
+function launchTradeMissionBatch(state, args) {
+  const {
+    systemId,
+    outboundCommodityId,
+    returnCommodityId,
+    shipIds,
+    envoyId,
+    mode
+  } = args;
+  const system = findSystem(state, systemId);
+  if (!system || !system.discovered || system.id === "sys-home") {
+    return { ok: false, message: "Invalid destination." };
+  }
+  const ships = shipIds.map((id) => findMerchantShip(state, id)).filter(Boolean);
+  if (ships.length === 0) {
+    return { ok: false, message: "Select at least one idle ship." };
+  }
+  if (ships.some((ship) => ship.status !== "idle")) {
+    return { ok: false, message: "All selected ships must be idle." };
+  }
+  const envoy = envoyId ? findTradeEnvoy(state, envoyId) : null;
+  if (envoy && envoy.status !== "idle") {
+    return { ok: false, message: "That Trade Envoy is already on assignment." };
+  }
+
+  const isPartial = mode === "partial";
+  const useFinancing = mode === "finance";
+  const plan = createTradeLoadPlan(state, ships, system, outboundCommodityId, returnCommodityId, envoy, state.credits, isPartial);
+  if (plan.loadedUnits <= 0) {
+    return { ok: false, message: "Not enough Credits to fund any cargo for this mission." };
+  }
+  if (!useFinancing && !isPartial && plan.totalUpfrontCost > state.credits) {
+    return { ok: false, message: "Not enough Credits for the full mission." };
+  }
+
+  const batchId = `batch-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  const borrowedAmount = useFinancing ? Math.max(0, plan.totalUpfrontCost - state.credits) : 0;
+  if (useFinancing) {
+    state.credits += borrowedAmount;
+  }
+  state.credits -= plan.totalUpfrontCost;
+  state.escrowCredits += plansEscrow(plan.plans);
+
+  let totalFinanceInterest = 0;
+  let batchDuration = 0;
+  const created = [];
+  for (let index = 0; index < plan.plans.length; index += 1) {
+    const item = plan.plans[index];
+    const ship = item.ship;
+    ship.status = "mission";
+    applyMarketPressure(getHomeSystem(state), outboundCommodityId, "buy");
+    const mission = {
+      id: `trade-${Date.now()}-${index}`,
+      batchId,
+      shipId: ship.id,
+      destinationSystemId: systemId,
+      outboundCommodityId,
+      returnCommodityId,
+      envoyId: envoy?.id || null,
+      units: item.units,
+      capacity: item.capacity,
+      outboundCost: item.outboundCost,
+      escrowReserved: item.escrowReserved,
+      estimatedOutboundRevenue: item.estimatedOutboundRevenue,
+      estimatedReturnCost: item.estimatedReturnCost,
+      borrowedAmount: 0,
+      financeInterest: 0,
+      financeRepayment: 0,
+      actualOutboundRevenue: 0,
+      actualReturnCost: 0,
+      returnUnits: 0,
+      arrivalResolved: false,
+      remainingSeconds: item.durationSeconds,
+      durationSeconds: item.durationSeconds,
+      createdAt: nowIso()
+    };
+    created.push(mission);
+    batchDuration = Math.max(batchDuration, item.durationSeconds);
+  }
+
+  if (borrowedAmount > 0 && created.length > 0) {
+    const totalUpfront = plan.totalUpfrontCost || 1;
+    created.forEach((mission, index) => {
+      let allocation = Math.round((borrowedAmount * plan.plans[index].upfrontCost) / totalUpfront);
+      mission.borrowedAmount = allocation;
+      mission.financeInterest = getMissionFinanceInterest(allocation, mission.durationSeconds);
+      mission.financeRepayment = allocation + mission.financeInterest;
+      totalFinanceInterest += mission.financeInterest;
+    });
+    const assigned = created.reduce((sum, mission) => sum + mission.borrowedAmount, 0);
+    const delta = borrowedAmount - assigned;
+    if (delta !== 0) {
+      const last = created[created.length - 1];
+      totalFinanceInterest -= last.financeInterest;
+      last.borrowedAmount += delta;
+      last.financeInterest = getMissionFinanceInterest(last.borrowedAmount, last.durationSeconds);
+      last.financeRepayment = last.borrowedAmount + last.financeInterest;
+      totalFinanceInterest += last.financeInterest;
+    }
+  }
+
+  state.tradeMissions.push(...created);
+  state.tradeMissionBatches[batchId] = {
+    id: batchId,
+    destinationSystemId: systemId,
+    outboundCommodityId,
+    returnCommodityId,
+    envoyId: envoy?.id || null,
+    shipIds: created.map((mission) => mission.shipId),
+    totalShips: created.length,
+    completedShips: 0,
+    totalProfit: 0,
+    totalRevenue: 0,
+    totalFinanceInterest: 0,
+    totalFinanceRepayment: 0,
+    totalOutboundUnits: created.reduce((sum, mission) => sum + mission.units, 0),
+    totalReturnUnits: 0,
+    partialReturnShips: 0,
+    contractDeliveryUnits: 0,
+    envoyCommodityUnits: 0,
+    launchedAt: nowIso(),
+    estimatedProfitAfterInterest: plan.totalEstimatedProfit - totalFinanceInterest,
+    durationSeconds: batchDuration,
+    financed: borrowedAmount > 0
+  };
+
+  if (envoy) {
+    envoy.status = "mission";
+    envoy.assignedBatchId = batchId;
+  }
+
   recomputeAllSystemPrices(state);
-
-  const outboundCargoName = COMMODITY_INDEX[outboundCommodityId].name;
-  const returnCargoName = COMMODITY_INDEX[returnCommodityId].name;
-  pushLog(
-    state,
-    `Launched ${launchPlans.length} ship${launchPlans.length > 1 ? "s" : ""} to ${destination.name}: ${outboundCargoName} out, ${returnCargoName} back (${isPartialLoad ? "partial load, " : ""}upfront ${formatCredits(totalLaunchCost)}${useFinancing ? `, financed ${formatCredits(borrowedAmount)}` : ""}).`
-  );
-
+  pushLog(state, `Trade mission launched to ${system.name}: ${created.length} ship${created.length > 1 ? "s" : ""}, ${COMMODITY_INDEX[outboundCommodityId].name} out, ${COMMODITY_INDEX[returnCommodityId].name} back${useFinancing ? `, financed ${formatCredits(borrowedAmount)}` : isPartial ? ", partial load" : ""}.`);
   return { ok: true };
+}
+
+function plansEscrow(plans) {
+  return plans.reduce((sum, plan) => sum + plan.escrowReserved, 0);
 }
 
 function resolveTradeMissionArrival(state, mission) {
   if (mission.arrivalResolved) {
     return;
   }
-
-  const ship = findMerchantShip(state, mission.shipId);
   const destination = findSystem(state, mission.destinationSystemId);
   const envoy = mission.envoyId ? findTradeEnvoy(state, mission.envoyId) : null;
   if (!destination) {
     mission.arrivalResolved = true;
     return;
   }
-
   const outboundSellPrice = applyEnvoyPriceModifier(destination.prices[mission.outboundCommodityId], envoy, mission.outboundCommodityId, "sell");
-  const actualOutboundRevenue = outboundSellPrice * mission.units;
-  state.credits += actualOutboundRevenue;
-  applyMarketTrade(destination, mission.outboundCommodityId, "sell");
-  applyCorporateContractDelivery(state, destination.id, mission.outboundCommodityId, mission.units);
-
-  const escrowReserved = Number.isFinite(mission.escrowReserved) ? mission.escrowReserved : 0;
-  state.credits += escrowReserved;
-  state.escrowCredits = Math.max(0, state.escrowCredits - escrowReserved);
-
-  const returnBuyPrice = applyEnvoyPriceModifier(destination.prices[mission.returnCommodityId], envoy, mission.returnCommodityId, "buy");
-  const affordableReturnUnits = Math.min(
-    mission.units,
-    Math.floor(state.credits / Math.max(1, returnBuyPrice))
-  );
-  const actualReturnCost = returnBuyPrice * affordableReturnUnits;
-  state.credits -= actualReturnCost;
-  if (affordableReturnUnits > 0) {
-    applyMarketTrade(destination, mission.returnCommodityId, "buy");
+  const revenue = outboundSellPrice * mission.units;
+  state.credits += revenue;
+  mission.actualOutboundRevenue = revenue;
+  applyMarketPressure(destination, mission.outboundCommodityId, "sell");
+  const delivered = applyCorporateContractDelivery(state, destination.id, mission.outboundCommodityId, mission.units);
+  const batch = state.tradeMissionBatches[mission.batchId];
+  if (batch) {
+    batch.contractDeliveryUnits += delivered;
   }
 
-  mission.arrivalResolved = true;
-  mission.actualOutboundRevenue = actualOutboundRevenue;
-  mission.actualReturnCost = actualReturnCost;
-  mission.returnUnits = affordableReturnUnits;
-  mission.outboundSellPrice = outboundSellPrice;
-  mission.returnBuyPrice = returnBuyPrice;
+  state.credits += mission.escrowReserved;
+  state.escrowCredits = Math.max(0, state.escrowCredits - mission.escrowReserved);
 
+  const returnBuyPrice = applyEnvoyPriceModifier(destination.prices[mission.returnCommodityId], envoy, mission.returnCommodityId, "buy");
+  const returnUnits = Math.min(mission.units, Math.floor(state.credits / Math.max(1, returnBuyPrice)));
+  const returnCost = returnBuyPrice * returnUnits;
+  state.credits -= returnCost;
+  mission.actualReturnCost = returnCost;
+  mission.returnUnits = returnUnits;
+  mission.arrivalResolved = true;
+  if (returnUnits > 0) {
+    applyMarketPressure(destination, mission.returnCommodityId, "buy");
+  }
   recomputeAllSystemPrices(state);
 }
 
-function resolveTradeMission(state, mission, options = {}) {
-  const ship = state.merchantShips.find((s) => s.id === mission.shipId);
+function finalizeTradeMission(state, mission) {
+  const ship = findMerchantShip(state, mission.shipId);
+  const home = getHomeSystem(state);
+  const destination = findSystem(state, mission.destinationSystemId);
+  const envoy = mission.envoyId ? findTradeEnvoy(state, mission.envoyId) : null;
   if (ship) {
     ship.status = "idle";
   }
 
-  const home = getHomeSystem(state);
-  const destination = findSystem(state, mission.destinationSystemId);
-  const envoy = mission.envoyId ? findTradeEnvoy(state, mission.envoyId) : null;
-  const returnSellPrice = home
-    ? applyEnvoyPriceModifier(home.prices[mission.returnCommodityId], envoy, mission.returnCommodityId, "sell")
-    : mission.returnSellPrice;
-  const outboundRevenue = Number.isFinite(mission.actualOutboundRevenue) ? mission.actualOutboundRevenue : 0;
-  const returnUnits = Number.isFinite(mission.returnUnits) ? mission.returnUnits : mission.units;
-  const returnRevenue = returnSellPrice * returnUnits;
-  const outboundCost = Number.isFinite(mission.outboundCost)
-    ? mission.outboundCost
-    : mission.outboundBuyPrice * mission.units;
-  const returnCost = Number.isFinite(mission.actualReturnCost) ? mission.actualReturnCost : 0;
-  const totalRevenue = outboundRevenue + returnRevenue;
-  const totalCost = outboundCost + returnCost;
-  const financeInterest = Number.isFinite(mission.financeInterest) ? mission.financeInterest : 0;
-  const financeRepayment = Number.isFinite(mission.financeRepayment) ? mission.financeRepayment : 0;
-  const profit = totalRevenue - totalCost - financeInterest;
-  const partialReturn = returnUnits < mission.units;
-
+  const returnSellPrice = applyEnvoyPriceModifier(home.prices[mission.returnCommodityId], envoy, mission.returnCommodityId, "sell");
+  const returnRevenue = returnSellPrice * (mission.returnUnits || 0);
   state.credits += returnRevenue;
-  if (financeRepayment > 0) {
-    state.credits -= financeRepayment;
+  if (mission.financeRepayment > 0) {
+    state.credits -= mission.financeRepayment;
   }
-  if (home) {
-    applyMarketTrade(home, mission.returnCommodityId, "sell");
+  if ((mission.returnUnits || 0) > 0) {
+    applyMarketPressure(home, mission.returnCommodityId, "sell");
   }
   recomputeAllSystemPrices(state);
-  recomputeAllSystemPrices(state);
-  const outboundCargoName = COMMODITY_INDEX[mission.outboundCommodityId]
-    ? COMMODITY_INDEX[mission.outboundCommodityId].name
-    : mission.outboundCommodityId;
-  const returnCargoName = COMMODITY_INDEX[mission.returnCommodityId]
-    ? COMMODITY_INDEX[mission.returnCommodityId].name
-    : mission.returnCommodityId;
 
-  const batchId = mission.batchId || mission.id;
-  const batch = state.tradeMissionBatches[batchId];
+  const totalRevenue = (mission.actualOutboundRevenue || 0) + returnRevenue;
+  const totalCost = (mission.outboundCost || 0) + (mission.actualReturnCost || 0);
+  const profit = totalRevenue - totalCost - (mission.financeInterest || 0);
+  const batch = state.tradeMissionBatches[mission.batchId];
   if (batch) {
     batch.completedShips += 1;
     batch.totalProfit += profit;
-    batch.totalFinanceRepayment += financeRepayment;
-    batch.totalFinanceInterest += financeInterest;
-    if (partialReturn) {
+    batch.totalRevenue += totalRevenue;
+    batch.totalFinanceInterest += mission.financeInterest || 0;
+    batch.totalFinanceRepayment += mission.financeRepayment || 0;
+    batch.totalReturnUnits += mission.returnUnits || 0;
+    if ((mission.returnUnits || 0) < mission.units) {
       batch.partialReturnShips += 1;
     }
-    batch.envoyCommodityUnits += getEnvoyCommodityMissionUnits(
-      envoy,
-      mission.outboundCommodityId,
-      mission.returnCommodityId,
-      mission.units,
-      returnUnits
-    );
+    batch.envoyCommodityUnits += getEnvoyMissionUnits(envoy, mission.outboundCommodityId, mission.returnCommodityId, mission.units, mission.returnUnits || 0);
   }
-
-  if (!options.suppressLog) {
-    const signClass = profit >= 0 ? "+" : "";
-    const shipLabel = ship ? getShipDisplayName(ship) : "Ship";
-    pushLog(
-      state,
-      `${shipLabel} completed round trip to ${destination ? destination.name : "unknown"} (${outboundCargoName} out, ${returnCargoName} back): ${signClass}${formatCredits(profit)}${financeRepayment > 0 ? ` after repaying ${formatCredits(financeRepayment)} (${formatCredits(financeInterest)} interest)` : ""}.`
-    );
-  }
-
-  return {
-    batchId,
-    profit,
-    financeRepayment,
-    financeInterest,
-    partialReturn,
-    destinationName: destination ? destination.name : "unknown",
-    outboundCargoName,
-    returnCargoName,
-    envoyId: envoy?.id || null
-  };
 }
 
-function updateMerchantShipStyle(state, shipId, name, color) {
-  const ship = findMerchantShip(state, shipId);
-  if (!ship) {
-    return { ok: false, message: "Ship not found." };
+function completeBatchIfReady(state, batchId) {
+  const batch = state.tradeMissionBatches[batchId];
+  if (!batch || batch.completedShips < batch.totalShips) {
+    return;
   }
-
-  const trimmed = String(name || "").trim();
-  if (!trimmed) {
-    return { ok: false, message: "Ship name cannot be empty." };
+  const envoy = batch.envoyId ? findTradeEnvoy(state, batch.envoyId) : null;
+  let envoySummary = "";
+  if (envoy) {
+    if (batch.envoyCommodityUnits > 0) {
+      const xpGain = Math.max(1, Math.floor(Math.sqrt(batch.envoyCommodityUnits)));
+      const previousLevel = getTradeEnvoyLevel(envoy.xp);
+      envoy.xp += xpGain;
+      const newLevel = getTradeEnvoyLevel(envoy.xp);
+      envoySummary = ` ${envoy.name} gained ${xpGain} envoy XP${newLevel > previousLevel ? ` and reached level ${newLevel}` : ""}.`;
+    }
+    envoy.status = "idle";
+    envoy.assignedBatchId = null;
   }
-  if (trimmed.length > SHIP_NAME_MAX_LENGTH) {
-    return { ok: false, message: `Ship name must be ${SHIP_NAME_MAX_LENGTH} chars or fewer.` };
-  }
-  if (!SHIP_NAME_COLORS.includes(color)) {
-    return { ok: false, message: "Invalid ship name color." };
-  }
-
-  ship.name = trimmed;
-  ship.nameColor = color;
-  pushLog(state, `${ship.id.toUpperCase()} updated: callsign "${ship.name}".`);
-  return { ok: true };
+  const system = findSystem(state, batch.destinationSystemId);
+  const sign = batch.totalProfit >= 0 ? "+" : "";
+  pushLog(state, `Trade mission completed at ${system?.name || "unknown destination"}: ${batch.totalShips} ship${batch.totalShips > 1 ? "s" : ""}, ${sign}${formatCredits(batch.totalProfit)}${batch.totalFinanceRepayment > 0 ? ` after repaying ${formatCredits(batch.totalFinanceRepayment)} (${formatCredits(batch.totalFinanceInterest)} interest)` : ""}.${envoySummary}`);
+  state.tradeHistory.unshift({
+    id: `history-${Date.now()}-${Math.random()}`,
+    timestamp: nowIso(),
+    systemId: batch.destinationSystemId,
+    durationSeconds: batch.durationSeconds,
+    shipsUsed: batch.totalShips,
+    outboundCommodityId: batch.outboundCommodityId,
+    returnCommodityId: batch.returnCommodityId,
+    outboundUnits: batch.totalOutboundUnits,
+    returnUnits: batch.totalReturnUnits,
+    financed: batch.financed,
+    profit: batch.totalProfit,
+    revenue: batch.totalRevenue,
+    envoyId: batch.envoyId,
+    contractDeliveryUnits: batch.contractDeliveryUnits
+  });
+  state.tradeHistory = state.tradeHistory.slice(0, BALANCE.MAX_TRADE_HISTORY);
+  delete state.tradeMissionBatches[batchId];
 }
 
-function startShipUpgrade(state, shipId, upgradeType) {
+function startShipUpgrade(state, shipId, type) {
   const ship = findMerchantShip(state, shipId);
   if (!ship) {
     return { ok: false, message: "Ship not found." };
   }
   if (ship.status !== "idle") {
-    return { ok: false, message: "Ship must be idle for upgrades." };
+    return { ok: false, message: "Ship must be idle to begin an upgrade." };
   }
-
-  const validType = upgradeType === "speed" ? "speed" : upgradeType === "cargo" ? "cargo" : null;
-  if (!validType) {
-    return { ok: false, message: "Invalid upgrade type." };
-  }
-
-  const cost = validType === "cargo" ? getCargoUpgradeCost(ship) : getSpeedUpgradeCost(ship);
+  const cost = getUpgradeCost(ship, type);
   if (state.credits < cost) {
     return { ok: false, message: `Need ${formatCredits(cost)}.` };
   }
-
-  const durationSeconds = getUpgradeDurationSeconds(ship, validType);
   state.credits -= cost;
   ship.status = "upgrading";
-
   state.upgradeMissions.push({
-    id: `um-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-    shipId: ship.id,
-    upgradeType: validType,
-    remainingSeconds: durationSeconds,
-    durationSeconds,
-    cost,
-    startedAt: nowIso()
+    id: `upgrade-${Date.now()}-${Math.random()}`,
+    shipId,
+    upgradeType: type,
+    remainingSeconds: getUpgradeDuration(ship, type),
+    durationSeconds: getUpgradeDuration(ship, type),
+    createdAt: nowIso()
   });
-
-  pushLog(
-    state,
-    `${getShipDisplayName(ship)} started ${validType} upgrade (${formatSeconds(durationSeconds)}, cost ${formatCredits(cost)}).`
-  );
+  pushLog(state, `${getShipDisplayName(ship)} started a ${type} upgrade.`);
   return { ok: true };
 }
 
-function resolveUpgradeMission(state, upgradeMission) {
-  const ship = findMerchantShip(state, upgradeMission.shipId);
+function resolveUpgradeMission(state, mission) {
+  const ship = findMerchantShip(state, mission.shipId);
   if (!ship) {
     return;
   }
-
-  if (upgradeMission.upgradeType === "speed") {
-    ship.speedLevel += 1;
-  } else {
+  if (mission.upgradeType === "cargo") {
     ship.cargoLevel += 1;
+  } else {
+    ship.speedLevel += 1;
   }
   ship.status = "idle";
-
-  pushLog(
-    state,
-    `${getShipDisplayName(ship)} ${upgradeMission.upgradeType} upgrade complete (L${
-      upgradeMission.upgradeType === "speed" ? ship.speedLevel : ship.cargoLevel
-    }).`
-  );
+  pushLog(state, `${getShipDisplayName(ship)} completed a ${mission.upgradeType} upgrade.`);
 }
 
 function buyMerchantShip(state) {
-  const cost = state.nextMerchantShipCost;
+  if (state.merchantShips.length >= state.maxMerchantShips) {
+    return { ok: false, message: `Ship cap reached (${state.maxMerchantShips}).` };
+  }
+  const cost = getMerchantShipCostForCount(state.merchantShips.length);
   if (state.credits < cost) {
     return { ok: false, message: `Need ${formatCredits(cost)}.` };
   }
-
   state.credits -= cost;
   const newIndex = state.merchantShips.length + 1;
   state.merchantShips.push({
@@ -2169,12 +1525,7 @@ function buyMerchantShip(state) {
     speedLevel: 0,
     status: "idle"
   });
-  state.nextMerchantShipCost = clampPositiveInt(cost * BALANCE.MERCHANT_SHIP_COST_GROWTH);
-
-  pushLog(
-    state,
-    `Purchased merchant ship M-${newIndex}. Fleet size is now ${state.merchantShips.length}.`
-  );
+  pushLog(state, `Purchased merchant ship M-${newIndex}. Fleet size: ${state.merchantShips.length}/${state.maxMerchantShips}.`);
   return { ok: true };
 }
 
@@ -2185,345 +1536,487 @@ function buyScoutShip(state) {
   if (state.credits < BALANCE.SCOUT_SHIP_COST) {
     return { ok: false, message: `Need ${formatCredits(BALANCE.SCOUT_SHIP_COST)}.` };
   }
-
   state.credits -= BALANCE.SCOUT_SHIP_COST;
   state.scoutShip = { owned: true, status: "idle" };
-
-  pushLog(state, "Purchased scouting ship. Deep-space surveying is now available.");
+  pushLog(state, "Purchased scouting ship.");
   return { ok: true };
 }
 
 function launchScoutMission(state) {
   if (!state.scoutShip.owned) {
-    return { ok: false, message: "No scout ship owned." };
+    return { ok: false, message: "Purchase the scouting ship first." };
   }
-  if (state.scoutShip.status === "mission" || state.scoutMission) {
-    return { ok: false, message: "Scout mission already in progress." };
+  if (state.scoutShip.status !== "idle") {
+    return { ok: false, message: "Scout ship is already on assignment." };
   }
-
   const target = getUndiscoveredSystems(state).sort((a, b) => a.distance - b.distance)[0];
   if (!target) {
-    return { ok: false, message: "All systems discovered." };
+    return { ok: false, message: "All systems have been discovered." };
   }
-
-  const durationSeconds = getScoutMissionDuration(state);
-
+  const duration = getScoutMissionDuration(state);
   state.scoutMission = {
-    id: `sm-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+    id: `scout-${Date.now()}`,
     targetSystemId: target.id,
-    remainingSeconds: durationSeconds,
-    durationSeconds,
+    remainingSeconds: duration,
+    durationSeconds: duration,
     createdAt: nowIso()
   };
   state.scoutShip.status = "mission";
   state.scoutMissionsLaunched += 1;
-
-  pushLog(
-    state,
-    `Scout mission launched toward unknown coordinates near ${target.name}. Duration ${formatSeconds(durationSeconds)}.`
-  );
+  pushLog(state, `Scout mission launched toward ${target.name}.`);
   return { ok: true };
 }
 
-function resolveScoutMission(state, mission) {
-  const target = findSystem(state, mission.targetSystemId);
+function resolveScoutMission(state) {
+  const mission = state.scoutMission;
+  const target = mission ? findSystem(state, mission.targetSystemId) : null;
   if (target) {
     target.discovered = true;
-    pushLog(
-      state,
-      `Scout mission complete. New system discovered: ${target.name} (distance ${formatDistanceLy(target.distance)}).`
-    );
+    fillContracts(state);
+    const highs = target.typeHigh.map((id) => COMMODITY_INDEX[id].name).join(", ") || "None";
+    const lows = target.typeLow.map((id) => COMMODITY_INDEX[id].name).join(", ") || "None";
+    addToast(state, "System Discovered", `${target.name} charted at ${formatDistanceLy(target.distance)}. High: ${highs}. Low: ${lows}.`);
+    pushLog(state, `Scout mission complete. ${target.name} discovered at ${formatDistanceLy(target.distance)}. High: ${highs}. Low: ${lows}.`);
   } else {
-    pushLog(state, "Scout mission complete, but no valid target was found.");
+    pushLog(state, "Scout mission completed, but the target data was unavailable.");
   }
-
   state.scoutMission = null;
-  state.scoutShip.status = "idle";
+  state.scoutShip.status = state.scoutShip.owned ? "idle" : "none";
 }
 
-function advanceGameBySeconds(state, elapsedSeconds) {
-  const seconds = Math.max(0, Math.floor(elapsedSeconds || 0));
-  let timersAdvanced = false;
+function updateMerchantShipStyle(state, shipId, name, color) {
+  const ship = findMerchantShip(state, shipId);
+  if (!ship) {
+    return { ok: false, message: "Ship not found." };
+  }
+  const trimmed = String(name || "").trim();
+  if (!trimmed) {
+    return { ok: false, message: "Ship name cannot be empty." };
+  }
+  if (trimmed.length > SHIP_NAME_MAX_LENGTH) {
+    return { ok: false, message: `Ship name must be ${SHIP_NAME_MAX_LENGTH} characters or fewer.` };
+  }
+  if (!SHIP_NAME_COLORS.includes(color)) {
+    return { ok: false, message: "Invalid ship color." };
+  }
+  ship.name = trimmed;
+  ship.nameColor = color;
+  pushLog(state, `${ship.id.toUpperCase()} updated to callsign "${ship.name}".`);
+  return { ok: true };
+}
+
+function advanceNotifications(state, seconds) {
+  state.notifications.forEach((notification) => {
+    notification.remainingSeconds -= seconds;
+  });
+  state.notifications = state.notifications.filter((notification) => notification.remainingSeconds > 0);
+}
+
+function advanceGameBySeconds(state, seconds) {
+  const elapsed = Math.max(0, Math.floor(seconds || 0));
+  if (elapsed <= 0) {
+    return { majorStateChange: false, timersAdvanced: false };
+  }
+
   let majorStateChange = false;
-  let marketChanged = false;
-  let completedTradeMissions = 0;
-  let completedScoutMissions = 0;
-  let completedUpgradeMissions = 0;
+  let timersAdvanced = false;
 
-  if (seconds <= 0) {
-    return {
-      timersAdvanced,
-      majorStateChange,
-      marketChanged,
-      completedTradeMissions,
-      completedScoutMissions,
-      completedUpgradeMissions
-    };
-  }
-
-  if (decayMarketPressure(state, seconds)) {
-    marketChanged = true;
-  }
-  if (state.marketEvents.length > 0) {
-    timersAdvanced = true;
-  }
-  if (advanceMarketEvents(state, seconds)) {
-    marketChanged = true;
-  }
-  if (advanceStructuralEvents(state, seconds)) {
-    marketChanged = true;
-    majorStateChange = true;
-  }
-  if (advanceCorporateContracts(state, seconds)) {
-    majorStateChange = true;
-  }
-  if (marketChanged) {
+  advanceNotifications(state, elapsed);
+  if (decayMarketPressure(state, elapsed)) {
     recomputeAllSystemPrices(state);
+    timersAdvanced = true;
+  }
+  if (advanceMarketEvents(state, elapsed)) {
+    recomputeAllSystemPrices(state);
+    majorStateChange = true;
+  }
+  if (advanceStructuralEvents(state, elapsed)) {
+    recomputeAllSystemPrices(state);
+    majorStateChange = true;
+  }
+  if (advanceContracts(state, elapsed)) {
+    majorStateChange = true;
   }
 
-  for (const mission of state.tradeMissions) {
-    mission.remainingSeconds -= seconds;
+  state.tradeMissions.forEach((mission) => {
+    mission.remainingSeconds -= elapsed;
     timersAdvanced = true;
-    const halfDuration = Math.max(1, Math.floor(mission.durationSeconds / 2));
-    if (!mission.arrivalResolved && mission.remainingSeconds <= halfDuration) {
+    const half = Math.max(1, Math.floor(mission.durationSeconds / 2));
+    if (!mission.arrivalResolved && mission.remainingSeconds <= half) {
       resolveTradeMissionArrival(state, mission);
       majorStateChange = true;
     }
-  }
+  });
 
-  const completedTrades = state.tradeMissions
-    .filter((m) => m.remainingSeconds <= 0)
-    .sort((a, b) => a.remainingSeconds - b.remainingSeconds);
-  if (completedTrades.length > 0) {
-    state.tradeMissions = state.tradeMissions.filter((m) => m.remainingSeconds > 0);
-    for (const mission of completedTrades) {
-      const summary = resolveTradeMission(state, mission, { suppressLog: true });
-      const batch = state.tradeMissionBatches[summary.batchId];
-      if (batch && batch.completedShips >= batch.totalShips) {
-        const batchEnvoy = batch.envoyId ? findTradeEnvoy(state, batch.envoyId) : null;
-        let envoySummary = "";
-        if (batchEnvoy && batch.envoyCommodityUnits > 0) {
-          const xpGain = Math.max(1, Math.floor(Math.sqrt(batch.envoyCommodityUnits)));
-          const previousLevel = getEnvoyLevel(batchEnvoy.xp);
-          batchEnvoy.xp += xpGain;
-          const newLevel = getEnvoyLevel(batchEnvoy.xp);
-          envoySummary = ` ${batchEnvoy.name} earned ${xpGain} envoy XP${newLevel > previousLevel ? ` and reached level ${newLevel}` : ""}.`;
-        }
-        const sign = batch.totalProfit >= 0 ? "+" : "";
-        pushLog(
-          state,
-          `Trade mission to ${summary.destinationName} completed (${batch.totalShips} ship${batch.totalShips > 1 ? "s" : ""}, ${summary.outboundCargoName} out, ${summary.returnCargoName} back): ${sign}${formatCredits(batch.totalProfit)}${batch.totalFinanceRepayment > 0 ? ` after repaying ${formatCredits(batch.totalFinanceRepayment)} (${formatCredits(batch.totalFinanceInterest)} interest)` : ""}${batch.partialReturnShips > 0 ? `, ${batch.partialReturnShips} partial return load${batch.partialReturnShips > 1 ? "s" : ""}` : ""}.${envoySummary}`
-        );
-        delete state.tradeMissionBatches[summary.batchId];
-      }
-    }
-    completedTradeMissions += completedTrades.length;
+  const completedMissions = state.tradeMissions.filter((mission) => mission.remainingSeconds <= 0);
+  if (completedMissions.length > 0) {
+    state.tradeMissions = state.tradeMissions.filter((mission) => mission.remainingSeconds > 0);
+    completedMissions.forEach((mission) => {
+      finalizeTradeMission(state, mission);
+      completeBatchIfReady(state, mission.batchId);
+    });
     majorStateChange = true;
   }
 
   if (state.scoutMission) {
-    state.scoutMission.remainingSeconds -= seconds;
+    state.scoutMission.remainingSeconds -= elapsed;
     timersAdvanced = true;
-
     if (state.scoutMission.remainingSeconds <= 0) {
-      resolveScoutMission(state, state.scoutMission);
-      completedScoutMissions += 1;
+      resolveScoutMission(state);
       majorStateChange = true;
     }
   }
 
-  for (const upgradeMission of state.upgradeMissions) {
-    upgradeMission.remainingSeconds -= seconds;
+  state.upgradeMissions.forEach((mission) => {
+    mission.remainingSeconds -= elapsed;
     timersAdvanced = true;
-  }
-
-  const completedUpgrades = state.upgradeMissions
-    .filter((u) => u.remainingSeconds <= 0)
-    .sort((a, b) => a.remainingSeconds - b.remainingSeconds);
+  });
+  const completedUpgrades = state.upgradeMissions.filter((mission) => mission.remainingSeconds <= 0);
   if (completedUpgrades.length > 0) {
-    state.upgradeMissions = state.upgradeMissions.filter((u) => u.remainingSeconds > 0);
-    for (const upgradeMission of completedUpgrades) {
-      resolveUpgradeMission(state, upgradeMission);
-    }
-    completedUpgradeMissions += completedUpgrades.length;
+    state.upgradeMissions = state.upgradeMissions.filter((mission) => mission.remainingSeconds > 0);
+    completedUpgrades.forEach((mission) => resolveUpgradeMission(state, mission));
     majorStateChange = true;
   }
 
-  return {
-    timersAdvanced,
-    majorStateChange,
-    marketChanged,
-    completedTradeMissions,
-    completedScoutMissions,
-    completedUpgradeMissions
-  };
+  return { majorStateChange, timersAdvanced };
 }
 
 function applyOfflineProgress(state) {
-  const lastUpdateMs = Date.parse(state.lastUpdatedAt);
-  if (!Number.isFinite(lastUpdateMs)) {
-    return {
-      timersAdvanced: false,
-      majorStateChange: false,
-      marketChanged: false,
-      elapsedSeconds: 0,
-      completedTradeMissions: 0,
-      completedScoutMissions: 0,
-      creditsDelta: 0,
-      discoveredDelta: 0
-    };
+  const lastUpdated = Date.parse(state.lastUpdatedAt || nowIso());
+  if (!Number.isFinite(lastUpdated)) {
+    return null;
   }
-
-  const nowMs = Date.now();
-  const elapsedSeconds = Math.max(0, Math.floor((nowMs - lastUpdateMs) / 1000));
-  if (elapsedSeconds <= 0) {
-    return {
-      timersAdvanced: false,
-      majorStateChange: false,
-      marketChanged: false,
-      elapsedSeconds: 0,
-      completedTradeMissions: 0,
-      completedScoutMissions: 0,
-      creditsDelta: 0,
-      discoveredDelta: 0
-    };
+  const elapsed = Math.max(0, Math.floor((Date.now() - lastUpdated) / 1000));
+  if (elapsed <= 0) {
+    return null;
   }
-
   const creditsBefore = state.credits;
-  const discoveredBefore = state.systems.filter((s) => s.discovered).length;
-  const result = advanceGameBySeconds(state, elapsedSeconds);
-  const creditsDelta = state.credits - creditsBefore;
-  const discoveredAfter = state.systems.filter((s) => s.discovered).length;
-  const discoveredDelta = discoveredAfter - discoveredBefore;
-  return { ...result, elapsedSeconds, creditsDelta, discoveredDelta };
+  const discoveredBefore = getDiscoveredSystems(state).length;
+  const tradesBefore = state.tradeHistory.length;
+  const result = advanceGameBySeconds(state, elapsed);
+  return {
+    elapsedSeconds: elapsed,
+    creditsDelta: state.credits - creditsBefore,
+    discoveredDelta: getDiscoveredSystems(state).length - discoveredBefore,
+    completedTradeMissions: Math.max(0, state.tradeHistory.length - tradesBefore),
+    result
+  };
+}
+
+function normalizeLoadedState(raw) {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const state = createNewGameState();
+  state.version = 2;
+  state.credits = Number.isFinite(raw.credits) ? raw.credits : state.credits;
+  state.escrowCredits = Number.isFinite(raw.escrowCredits) ? raw.escrowCredits : 0;
+  state.playerReputationXp = Number.isFinite(raw.playerReputationXp)
+    ? Math.max(0, Math.floor(raw.playerReputationXp))
+    : Number.isFinite(raw.reputationPoints)
+      ? Math.max(0, Math.floor(raw.reputationPoints))
+      : 0;
+  state.playerLevel = getLevelForReputation(state.playerReputationXp);
+
+  state.systems = Array.isArray(raw.systems) && raw.systems.length > 0
+    ? raw.systems.map((system, index) => {
+        const fallbackType = SYSTEM_TYPES[index % SYSTEM_TYPES.length];
+        const high = Array.isArray(system.typeHigh) ? system.typeHigh : fallbackType.high;
+        const low = Array.isArray(system.typeLow) ? system.typeLow : fallbackType.low;
+        const profile = createSystemPriceProfile(system.name || `System ${index + 1}`, { high, low }, system.id === "sys-home");
+        return {
+          id: system.id || `sys-${index}`,
+          name: system.name || `System ${index + 1}`,
+          discovered: Boolean(system.discovered || system.id === "sys-home"),
+          distance: Number.isFinite(system.distance) ? Number(system.distance) : generateSystemDistanceLy(system.name || `System ${index + 1}`, index),
+          typeHigh: [...high],
+          typeLow: [...low],
+          baseTierIndex: system.baseTierIndex || profile.baseTierIndex,
+          priceBias: system.priceBias || profile.priceBias,
+          permanentTierShifts: system.permanentTierShifts || createZeroShiftMap(),
+          marketPressure: system.marketPressure || createZeroPressureMap(),
+          prices: {}
+        };
+      })
+    : state.systems;
+
+  state.globalBasePrices = { ...GLOBAL_BASE_PRICES, ...(raw.globalBasePrices || {}) };
+  for (const commodity of COMMODITIES) {
+    COMMODITY_INDEX[commodity.id].basePrice = state.globalBasePrices[commodity.id] || GLOBAL_BASE_PRICES[commodity.id];
+  }
+  recomputeAllSystemPrices(state);
+
+  state.merchantShips = Array.isArray(raw.merchantShips) && raw.merchantShips.length > 0
+    ? raw.merchantShips.map((ship, index) => ({
+        id: ship.id || `m-${index + 1}`,
+        name: ship.name || `Merchant ${index + 1}`,
+        nameColor: SHIP_NAME_COLORS.includes(ship.nameColor) ? ship.nameColor : SHIP_NAME_COLORS[index % SHIP_NAME_COLORS.length],
+        cargoLevel: Number.isFinite(ship.cargoLevel) ? Math.max(0, Math.floor(ship.cargoLevel)) : 0,
+        speedLevel: Number.isFinite(ship.speedLevel) ? Math.max(0, Math.floor(ship.speedLevel)) : 0,
+        status: "idle"
+      }))
+    : state.merchantShips;
+
+  state.maxMerchantShips = Number.isFinite(raw.maxMerchantShips)
+    ? Math.max(raw.maxMerchantShips, state.merchantShips.length)
+    : getDerivedMaxMerchantShips(state.playerLevel, state.merchantShips.length);
+
+  state.scoutShip = {
+    owned: Boolean(raw.scoutShip?.owned),
+    status: Boolean(raw.scoutShip?.owned) ? "idle" : "none"
+  };
+  state.scoutMission = raw.scoutMission ? {
+    id: raw.scoutMission.id || `scout-${Date.now()}`,
+    targetSystemId: raw.scoutMission.targetSystemId,
+    remainingSeconds: Math.max(0, Math.floor(raw.scoutMission.remainingSeconds || 0)),
+    durationSeconds: Math.max(1, Math.floor(raw.scoutMission.durationSeconds || 1)),
+    createdAt: raw.scoutMission.createdAt || nowIso()
+  } : null;
+  if (state.scoutMission) {
+    state.scoutShip.status = "mission";
+  }
+  state.scoutMissionsLaunched = Number.isFinite(raw.scoutMissionsLaunched) ? Math.max(0, raw.scoutMissionsLaunched) : 0;
+
+  state.marketEvents = Array.isArray(raw.marketEvents)
+    ? raw.marketEvents.map((event, index) => ({
+        id: event.id || `market-event-${index}`,
+        systemId: event.systemId,
+        commodityId: event.commodityId,
+        direction: event.direction > 0 ? 1 : -1,
+        headline: event.headline || "Market Shift",
+        body: event.body || "A local market shock is moving prices.",
+        remainingSeconds: Math.max(1, Math.floor(event.remainingSeconds || BALANCE.MARKET_EVENT_DURATION_SECONDS)),
+        startedAt: event.startedAt || nowIso()
+      }))
+    : getInitialMarketEvents(state);
+  if (state.marketEvents.length === 0) {
+    state.marketEvents = getInitialMarketEvents(state);
+  }
+  state.marketEventSequence = Number.isFinite(raw.marketEventSequence) ? raw.marketEventSequence : state.marketEvents.length;
+  state.nextMarketEventIn = Number.isFinite(raw.nextMarketEventIn) ? Math.max(1, raw.nextMarketEventIn) : BALANCE.MARKET_EVENT_OFFSET_SECONDS;
+  state.nextStructuralEventIn = Number.isFinite(raw.nextStructuralEventIn)
+    ? Math.max(1, raw.nextStructuralEventIn)
+    : getStructuralEventIntervalSeconds(raw.structuralEventSequence || 0);
+  state.structuralEventSequence = Number.isFinite(raw.structuralEventSequence) ? raw.structuralEventSequence : 0;
+  state.structuralHistory = Array.isArray(raw.structuralHistory) ? raw.structuralHistory : [];
+
+  state.contracts = Array.isArray(raw.contracts || raw.corporateContracts)
+    ? (raw.contracts || raw.corporateContracts).map((contract, index) => ({
+        id: contract.id || `contract-${index}`,
+        issuer: String(contract.issuer || "Corporate Board"),
+        headline: String(contract.headline || "Priority Requisition"),
+        body: String(contract.body || ""),
+        difficulty: Number.isFinite(contract.difficulty)
+          ? clamp(Math.floor(contract.difficulty), 1, 3)
+          : clamp(Math.floor(contract.reputationReward || 1), 1, 3),
+        reputationReward: Number.isFinite(contract.reputationReward)
+          ? clamp(Math.floor(contract.reputationReward), 1, 3)
+          : clamp(Math.floor(contract.difficulty || 1), 1, 3),
+        systemId: contract.systemId,
+        commodityId: contract.commodityId || COMMODITIES[0].id,
+        targetUnits: Math.max(1, Math.floor(contract.targetUnits || 1)),
+        deliveredUnits: Math.max(0, Math.floor(contract.deliveredUnits || 0)),
+        remainingSeconds: Math.max(1, Math.floor(contract.remainingSeconds || 1)),
+        durationSeconds: Math.max(1, Math.floor(contract.durationSeconds || 1)),
+        bounty: Math.max(1, Math.round(contract.bounty || 1)),
+        createdAt: contract.createdAt || nowIso()
+      }))
+    : [];
+  state.contractSequence = Number.isFinite(raw.contractSequence) ? raw.contractSequence : 0;
+  fillContracts(state);
+
+  state.tradeEnvoys = Array.isArray(raw.tradeEnvoys)
+    ? raw.tradeEnvoys.map((envoy, index) => ({
+        id: envoy.id || `envoy-${index + 1}`,
+        name: envoy.name || `${ENVOY_FIRST_NAMES[index]} ${ENVOY_LAST_NAMES[index]}`,
+        specialtyCommodityIds: Array.isArray(envoy.specialtyCommodityIds)
+          ? envoy.specialtyCommodityIds
+          : envoy.commodityId
+            ? [envoy.commodityId]
+            : [COMMODITIES[0].id],
+        xp: Math.max(0, Math.floor(envoy.xp || 0)),
+        status: "idle",
+        assignedBatchId: envoy.assignedBatchId || null
+      }))
+    : [];
+  state.nextEnvoyGrantIndex = Number.isFinite(raw.nextEnvoyGrantIndex)
+    ? raw.nextEnvoyGrantIndex
+    : state.tradeEnvoys.length;
+
+  state.tradeMissions = Array.isArray(raw.tradeMissions)
+    ? raw.tradeMissions.map((mission, index) => ({
+        id: mission.id || `trade-${index}`,
+        batchId: mission.batchId || mission.id || `batch-legacy-${index}`,
+        shipId: mission.shipId,
+        destinationSystemId: mission.destinationSystemId,
+        outboundCommodityId: mission.outboundCommodityId || mission.commodityId || COMMODITIES[0].id,
+        returnCommodityId: mission.returnCommodityId || COMMODITIES[1].id,
+        envoyId: mission.envoyId || null,
+        units: Math.max(1, Math.floor(mission.units || 1)),
+        capacity: Math.max(1, Math.floor(mission.capacity || mission.units || 1)),
+        outboundCost: Math.max(0, Math.round(mission.outboundCost || (mission.buyPrice || 0) * (mission.units || 0))),
+        escrowReserved: Math.max(0, Math.round(mission.escrowReserved || mission.returnEscrow || 0)),
+        estimatedOutboundRevenue: Math.max(0, Math.round(mission.estimatedOutboundRevenue || mission.sellPrice * (mission.units || 0) || 0)),
+        estimatedReturnCost: Math.max(0, Math.round(mission.estimatedReturnCost || 0)),
+        borrowedAmount: Math.max(0, Math.round(mission.borrowedAmount || 0)),
+        financeInterest: Math.max(0, Math.round(mission.financeInterest || 0)),
+        financeRepayment: Math.max(0, Math.round(mission.financeRepayment || 0)),
+        actualOutboundRevenue: Math.max(0, Math.round(mission.actualOutboundRevenue || 0)),
+        actualReturnCost: Math.max(0, Math.round(mission.actualReturnCost || 0)),
+        returnUnits: Math.max(0, Math.floor(mission.returnUnits || 0)),
+        arrivalResolved: Boolean(mission.arrivalResolved),
+        remainingSeconds: Math.max(0, Math.floor(mission.remainingSeconds || 0)),
+        durationSeconds: Math.max(1, Math.floor(mission.durationSeconds || 1)),
+        createdAt: mission.createdAt || nowIso()
+      }))
+    : [];
+
+  state.tradeMissionBatches = raw.tradeMissionBatches || {};
+  for (const mission of state.tradeMissions) {
+    const ship = findMerchantShip(state, mission.shipId);
+    if (ship) {
+      ship.status = "mission";
+    }
+    if (!state.tradeMissionBatches[mission.batchId]) {
+      state.tradeMissionBatches[mission.batchId] = {
+        id: mission.batchId,
+        destinationSystemId: mission.destinationSystemId,
+        outboundCommodityId: mission.outboundCommodityId,
+        returnCommodityId: mission.returnCommodityId,
+        envoyId: mission.envoyId || null,
+        shipIds: [mission.shipId],
+        totalShips: 1,
+        completedShips: 0,
+        totalProfit: 0,
+        totalRevenue: 0,
+        totalFinanceInterest: 0,
+        totalFinanceRepayment: 0,
+        totalOutboundUnits: mission.units,
+        totalReturnUnits: 0,
+        partialReturnShips: 0,
+        contractDeliveryUnits: 0,
+        envoyCommodityUnits: 0,
+        launchedAt: mission.createdAt,
+        estimatedProfitAfterInterest: 0,
+        durationSeconds: mission.durationSeconds,
+        financed: mission.borrowedAmount > 0
+      };
+    } else {
+      state.tradeMissionBatches[mission.batchId].shipIds.push(mission.shipId);
+      state.tradeMissionBatches[mission.batchId].totalShips += 1;
+      state.tradeMissionBatches[mission.batchId].totalOutboundUnits += mission.units;
+      state.tradeMissionBatches[mission.batchId].durationSeconds = Math.max(state.tradeMissionBatches[mission.batchId].durationSeconds, mission.durationSeconds);
+    }
+  }
+
+  state.tradeEnvoys.forEach((envoy) => {
+    const active = state.tradeMissions.find((mission) => mission.envoyId === envoy.id);
+    if (active) {
+      envoy.status = "mission";
+      envoy.assignedBatchId = active.batchId;
+    }
+  });
+
+  state.upgradeMissions = Array.isArray(raw.upgradeMissions)
+    ? raw.upgradeMissions.map((mission, index) => ({
+        id: mission.id || `upgrade-${index}`,
+        shipId: mission.shipId,
+        upgradeType: mission.upgradeType === "speed" ? "speed" : "cargo",
+        remainingSeconds: Math.max(1, Math.floor(mission.remainingSeconds || 1)),
+        durationSeconds: Math.max(1, Math.floor(mission.durationSeconds || 1)),
+        createdAt: mission.createdAt || nowIso()
+      }))
+    : [];
+  state.upgradeMissions.forEach((mission) => {
+    const ship = findMerchantShip(state, mission.shipId);
+    if (ship && ship.status === "idle") {
+      ship.status = "upgrading";
+    }
+  });
+
+  state.tradeHistory = Array.isArray(raw.tradeHistory) ? raw.tradeHistory : [];
+  state.notifications = [];
+  state.log = Array.isArray(raw.log) ? raw.log.slice(0, BALANCE.MAX_LOG_ENTRIES) : [];
+  state.lastUpdatedAt = raw.lastUpdatedAt || nowIso();
+  return state;
+}
+
+function loadGameState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    return normalizeLoadedState(JSON.parse(raw));
+  } catch (error) {
+    console.warn("Failed to load save", error);
+    return null;
+  }
+}
+
+function saveGameState(state) {
+  state.lastUpdatedAt = nowIso();
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 }
 
 const dom = {
   headerStats: document.getElementById("headerStats"),
-  homeSystemName: document.getElementById("homeSystemName"),
-  homeMarket: document.getElementById("homeMarket"),
-  contractsContent: document.getElementById("contractsContent"),
-  envoysContent: document.getElementById("envoysContent"),
-  systemsList: document.getElementById("systemsList"),
-  fleetContent: document.getElementById("fleetContent"),
-  shipyardContent: document.getElementById("shipyardContent"),
-  hangarContent: document.getElementById("hangarContent"),
-  newsfeedContent: document.getElementById("newsfeedContent"),
-  eventLog: document.getElementById("eventLog"),
-  economicHistoryContent: document.getElementById("economicHistoryContent"),
+  hubLocations: document.getElementById("hubLocations"),
+  toastStack: document.getElementById("toastStack"),
   openHelpBtn: document.getElementById("openHelpBtn"),
-  resetBtn: document.getElementById("resetBtn"),
+  helpModal: document.getElementById("helpModal"),
+  helpContent: document.getElementById("helpContent"),
+  closeHelpModalBtn: document.getElementById("closeHelpModalBtn"),
   awayModal: document.getElementById("awayModal"),
   awaySummaryList: document.getElementById("awaySummaryList"),
   closeAwayModalBtn: document.getElementById("closeAwayModalBtn"),
+  sectionModal: document.getElementById("sectionModal"),
+  sectionModalKicker: document.getElementById("sectionModalKicker"),
+  sectionModalTitle: document.getElementById("sectionModalTitle"),
+  sectionModalBody: document.getElementById("sectionModalBody"),
+  closeSectionModalBtn: document.getElementById("closeSectionModalBtn"),
   tradeModal: document.getElementById("tradeModal"),
   tradePlannerContent: document.getElementById("tradePlannerContent"),
-  closeTradeModalBtn: document.getElementById("closeTradeModalBtn"),
-  systemsModal: document.getElementById("systemsModal"),
-  systemsModalContent: document.getElementById("systemsModalContent"),
-  closeSystemsModalBtn: document.getElementById("closeSystemsModalBtn"),
-  helpModal: document.getElementById("helpModal"),
-  closeHelpModalBtn: document.getElementById("closeHelpModalBtn")
+  closeTradeModalBtn: document.getElementById("closeTradeModalBtn")
 };
 
 let gameState = loadGameState() || createNewGameState();
+let activeSection = null;
+let navigationSort = "distance";
 let tradePlannerState = null;
-let expandedHangarShipIds = new Set();
-let systemsModalSort = "profit";
-const offlineCatchUp = applyOfflineProgress(gameState);
+let hangarExpandedShipId = null;
+let hangarDrafts = {};
+let activeInputLock = false;
+let lastTickMs = Date.now();
 
-if (offlineCatchUp.elapsedSeconds > 0) {
-  pushLog(gameState, `Systems advanced ${formatSeconds(offlineCatchUp.elapsedSeconds)} while you were away.`);
+const offlineSummary = applyOfflineProgress(gameState);
+if (offlineSummary && offlineSummary.elapsedSeconds > 0) {
+  pushLog(gameState, `Systems advanced ${formatSeconds(offlineSummary.elapsedSeconds)} while you were away.`);
 }
 
-function showAwaySummary(summary) {
-  if (!dom.awayModal || !dom.awaySummaryList) {
-    return;
-  }
-
-  const missionsCompleted = summary.completedTradeMissions + summary.completedScoutMissions;
-  const creditsClass = summary.creditsDelta >= 0 ? "pos" : "neg";
-  const creditsSign = summary.creditsDelta >= 0 ? "+" : "";
-
-  dom.awaySummaryList.innerHTML = `
-    <li><strong>Time away:</strong> ${formatSeconds(summary.elapsedSeconds)}</li>
-    <li><strong>Missions completed:</strong> ${missionsCompleted} (Trade ${summary.completedTradeMissions}, Scout ${summary.completedScoutMissions})</li>
-    <li><strong>Credits change:</strong> <span class="${creditsClass}">${creditsSign}${formatCredits(summary.creditsDelta)}</span></li>
-    <li><strong>Systems discovered:</strong> ${summary.discoveredDelta}</li>
-  `;
-  dom.awayModal.classList.remove("hidden");
-  document.body.classList.add("modal-open");
+function modalIsOpen() {
+  return !dom.sectionModal.classList.contains("hidden") || !dom.tradeModal.classList.contains("hidden") || !dom.helpModal.classList.contains("hidden") || !dom.awayModal.classList.contains("hidden");
 }
 
-function openTradePlanner(systemId) {
-  const system = findSystem(gameState, systemId);
-  const idleShips = getIdleMerchantShips(gameState);
-  if (!system || !system.discovered || system.id === gameState.homeSystemId) {
-    return;
-  }
-
-  if (dom.systemsModal && !dom.systemsModal.classList.contains("hidden")) {
-    dom.systemsModal.classList.add("hidden");
-  }
-
-  tradePlannerState = {
-    systemId,
-    outboundCommodityId: COMMODITIES[0].id,
-    returnCommodityId: COMMODITIES[1]?.id || COMMODITIES[0].id,
-    selectedShipIds: idleShips.length > 0 ? [idleShips[0].id] : [],
-    selectedEnvoyId: null
-  };
-  renderTradePlanner();
-  dom.tradeModal.classList.remove("hidden");
-  document.body.classList.add("modal-open");
+function syncBodyLock() {
+  document.body.classList.toggle("modal-open", modalIsOpen());
 }
 
-function closeTradePlanner() {
-  if (!dom.tradeModal) {
-    return;
-  }
-  dom.tradeModal.classList.add("hidden");
-  if (
-    dom.systemsModal?.classList.contains("hidden") &&
-    dom.awayModal?.classList.contains("hidden") &&
-    dom.helpModal?.classList.contains("hidden")
-  ) {
-    document.body.classList.remove("modal-open");
-  }
-  tradePlannerState = null;
-}
-
-function bestCommodityForSystem(system, home) {
-  let best = null;
-  for (const commodity of COMMODITIES) {
-    const margin = system.prices[commodity.id] - home.prices[commodity.id];
-    if (!best || margin > best.margin) {
-      best = { commodityId: commodity.id, margin };
-    }
-  }
-  return best;
-}
-
-function bestReturnCommodityForSystem(system, home) {
-  let best = null;
-  for (const commodity of COMMODITIES) {
-    const margin = home.prices[commodity.id] - system.prices[commodity.id];
-    if (!best || margin > best.margin) {
-      best = { commodityId: commodity.id, margin };
-    }
-  }
-  return best;
+function renderToasts() {
+  dom.toastStack.innerHTML = gameState.notifications.map((item) => `
+    <article class="toast">
+      <strong>${escapeHtml(item.title)}</strong>
+      <div class="section-subtitle">${escapeHtml(item.body)}</div>
+    </article>
+  `).join("");
 }
 
 function renderHeader() {
-  const idle = getIdleMerchantShips(gameState).length;
-  const total = gameState.merchantShips.length;
-  const scoutText = !gameState.scoutShip.owned
-    ? "Not Owned"
-    : gameState.scoutShip.status === "mission"
-      ? "On Mission"
-      : "Idle";
-
+  const idleShips = getIdleMerchantShips(gameState).length;
+  const totalShips = gameState.merchantShips.length;
+  const rep = getReputationProgress(gameState.playerLevel, gameState.playerReputationXp);
+  const discovered = getDiscoveredSystems(gameState).length - 1;
+  const totalDiscoverable = BALANCE.REMOTE_SYSTEM_COUNT;
   dom.headerStats.innerHTML = `
     <article class="stat-chip">
       <span class="stat-label">Credits</span>
@@ -2534,848 +2027,800 @@ function renderHeader() {
       <span class="stat-value">${formatCredits(gameState.escrowCredits || 0)}</span>
     </article>
     <article class="stat-chip">
+      <span class="stat-label">Level</span>
+      <span class="stat-value">${gameState.playerLevel}</span>
+      <div class="section-subtitle">${gameState.playerReputationXp} rep • next at ${rep.next}</div>
+      <div class="progress-line"><div class="progress-fill" style="width:${rep.pct}%"></div></div>
+    </article>
+    <article class="stat-chip">
       <span class="stat-label">Merchant Ships</span>
-      <span class="stat-value">${idle} / ${total} Idle</span>
+      <span class="stat-value">${idleShips} idle / ${totalShips} owned</span>
+      <div class="section-subtitle">Cap ${gameState.maxMerchantShips}</div>
     </article>
     <article class="stat-chip">
       <span class="stat-label">Scout Ship</span>
-      <span class="stat-value">${scoutText}</span>
+      <span class="stat-value">${!gameState.scoutShip.owned ? "Not Owned" : gameState.scoutShip.status === "mission" ? "On Mission" : "Idle"}</span>
     </article>
     <article class="stat-chip">
-      <span class="stat-label">Reputation</span>
-      <span class="stat-value">${gameState.reputationPoints || 0}</span>
+      <span class="stat-label">Charts</span>
+      <span class="stat-value">${discovered} / ${totalDiscoverable}</span>
+      <div class="section-subtitle">Discovered systems</div>
     </article>
   `;
 }
 
-function renderHomeMarket() {
+function renderHub() {
+  const featured = getFeaturedSystems(gameState);
+  const latestPermanent = gameState.structuralHistory[0];
+  const locations = [
+    {
+      key: "trade",
+      title: "Trade Exchange",
+      body: featured[0] ? `Top route: ${featured[0].system.name}` : "Review home prices and launch trade missions.",
+      meta: `${getIdleMerchantShips(gameState).length} ships ready`
+    },
+    {
+      key: "navigation",
+      title: "Navigation Office",
+      body: `${getDiscoveredRemoteSystems(gameState).length} systems discovered`,
+      meta: `${getUndiscoveredSystems(gameState).length} still hidden`
+    },
+    {
+      key: "fleet",
+      title: "Merchant Fleet",
+      body: `${gameState.tradeMissions.length} active ship assignments`,
+      meta: `${gameState.upgradeMissions.length} ships in refit`
+    },
+    {
+      key: "shipyard",
+      title: "Shipyard",
+      body: `Next hull: ${formatCredits(getMerchantShipCostForCount(gameState.merchantShips.length))}`,
+      meta: `Cap ${gameState.maxMerchantShips}`
+    },
+    {
+      key: "hangar",
+      title: "Hangar",
+      body: "Rename, recolor, and upgrade each merchant ship.",
+      meta: `${gameState.merchantShips.length} merchant ships`
+    },
+    {
+      key: "contracts",
+      title: "Corporate Contracts",
+      body: `${gameState.contracts.length} active premium deliveries`,
+      meta: `${gameState.playerReputationXp} reputation`
+    },
+    {
+      key: "envoys",
+      title: "Trade Envoys",
+      body: `${gameState.tradeEnvoys.length} envoys on roster`,
+      meta: `${getIdleTradeEnvoys(gameState).length} idle`
+    },
+    {
+      key: "analytics",
+      title: "Trade Analytics",
+      body: `${gameState.tradeHistory.length} completed mission batches tracked`,
+      meta: "Profit trend and route leaders"
+    },
+    {
+      key: "news",
+      title: "Newsfeed & History",
+      body: `${gameState.marketEvents.length} live market events`,
+      meta: latestPermanent ? latestPermanent.headline : "No permanent shifts yet"
+    }
+  ];
+
+  dom.hubLocations.innerHTML = locations.map((location) => `
+    <button class="location-card open-section-btn" data-section="${location.key}" type="button">
+      <strong>${escapeHtml(location.title)}</strong>
+      <p class="section-subtitle">${escapeHtml(location.body)}</p>
+      <div class="pill-row"><span class="legend-pill">${escapeHtml(location.meta)}</span></div>
+    </button>
+  `).join("");
+}
+
+function renderHelp() {
+  dom.helpContent.innerHTML = buildHelpItems().map((item) => `
+    <article class="news-item">
+      <strong>${escapeHtml(item.title)}</strong>
+      <p class="section-subtitle">${escapeHtml(item.body)}</p>
+    </article>
+  `).join("");
+}
+
+function renderHomeMarketTable() {
   const home = getHomeSystem(gameState);
-  dom.homeSystemName.textContent = `${home.name} - Buy prices`;
-
-  const rows = COMMODITIES.map(
-    (commodity) => `
-    <tr>
-      <td>${renderCommodityLabel(commodity.id, home)}</td>
-      <td>${formatCredits(home.prices[commodity.id])}</td>
-      <td>${formatCredits(commodity.basePrice)}</td>
-    </tr>
-  `
-  ).join("");
-
-  dom.homeMarket.innerHTML = `
-    <table class="table" aria-label="Home market prices">
-      <thead>
-        <tr>
-          <th>Commodity</th>
-          <th>Home Buy Price</th>
-          <th>Base Price</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${rows}
-      </tbody>
-    </table>
+  return `
+    <div class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr><th>Commodity</th><th>Buy Price</th><th>Base</th></tr>
+        </thead>
+        <tbody>
+          ${COMMODITIES.map((commodity) => `
+            <tr>
+              <td>${renderCommodityLabel(commodity.id, home)}</td>
+              <td>${formatCredits(home.prices[commodity.id])}</td>
+              <td>${formatCredits(COMMODITY_INDEX[commodity.id].basePrice)}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
   `;
 }
 
-function renderCorporateContracts() {
-  if (!dom.contractsContent) {
-    return;
-  }
-
-  const contracts = Array.isArray(gameState.corporateContracts) ? gameState.corporateContracts : [];
-  const contractsMarkup = contracts.length === 0
-    ? '<div class="empty">No active corporate contracts right now.</div>'
-    : contracts
-        .map((contract) => {
-          const system = findSystem(gameState, contract.systemId);
-          const commodity = COMMODITY_INDEX[contract.commodityId];
-          const progress = Math.min(100, (contract.deliveredUnits / Math.max(1, contract.targetUnits)) * 100);
-          const remainingUnits = Math.max(0, contract.targetUnits - contract.deliveredUnits);
-          return `
-          <article class="card">
-            <div class="card-head">
-              <div>
-                <h3 class="card-title">${escapeHtml(contract.issuer)}</h3>
-                <p class="section-subtitle">${escapeHtml(contract.headline)}</p>
-              </div>
-              <span class="badge">${formatCredits(contract.bounty)} • ${contract.reputationReward || 0} rep</span>
-            </div>
-            <p class="section-subtitle">${commodity ? renderCommodityLabel(contract.commodityId, system || getHomeSystem(gameState)) : ""} to <strong>${escapeHtml(system ? system.name : "Unknown System")}</strong></p>
-            <p class="section-subtitle">${escapeHtml(contract.body)}</p>
-            <p class="section-subtitle">Need <strong>${contract.targetUnits}</strong> units • Remaining <strong>${remainingUnits}</strong> • Deadline <strong>${formatSeconds(contract.remainingSeconds)}</strong></p>
-            <div class="progress-track"><div class="progress-fill" style="width:${progress.toFixed(1)}%"></div></div>
-            <p class="section-subtitle">Progress: <strong>${contract.deliveredUnits} / ${contract.targetUnits}</strong> (${progress.toFixed(0)}%)</p>
-          </article>
-        `;
-        })
-        .join("");
-
-  dom.contractsContent.innerHTML = contractsMarkup;
-}
-
-function renderTradeEnvoys() {
-  if (!dom.envoysContent) {
-    return;
-  }
-
-  const envoyCandidates = Array.isArray(gameState.tradeEnvoyCandidates) ? gameState.tradeEnvoyCandidates : [];
-  const envoys = Array.isArray(gameState.tradeEnvoys) ? gameState.tradeEnvoys : [];
-
-  const recruitMarkup = envoyCandidates.length === 0
-    ? '<div class="empty">No envoy candidates available right now.</div>'
-    : envoyCandidates
-        .map((candidate) => `
-          <article class="card">
-            <div class="card-head">
-              <div>
-                <h3 class="card-title">${escapeHtml(candidate.name)}</h3>
-                <p class="section-subtitle">Trade Envoy Candidate</p>
-              </div>
-              <span class="badge">${candidate.hireCost} rep</span>
-            </div>
-            <p class="section-subtitle">Specialty: ${renderCommodityLabel(candidate.commodityId, getHomeSystem(gameState))}</p>
-            <button class="btn recruit-envoy-btn" data-envoy-candidate-id="${candidate.id}" ${gameState.reputationPoints >= candidate.hireCost ? "" : "disabled"} type="button">
-              ${gameState.reputationPoints >= candidate.hireCost ? "Recruit Envoy" : `Need ${candidate.hireCost} reputation`}
-            </button>
-          </article>
-        `)
-        .join("");
-
-  const rosterMarkup = envoys.length === 0
-    ? '<div class="empty">No Trade Envoys recruited yet. Complete Corporate Contracts to earn reputation.</div>'
-    : envoys
-        .map((envoy) => `
-          <article class="card">
-            <div class="card-head">
-              <div>
-                <h3 class="card-title">${escapeHtml(envoy.name)}</h3>
-                <p class="section-subtitle">Specialist Negotiator</p>
-              </div>
-              <span class="badge">Level ${getEnvoyLevel(envoy.xp)}</span>
-            </div>
-            <p class="section-subtitle">${renderCommodityLabel(envoy.commodityId, getHomeSystem(gameState))}</p>
-            <p class="section-subtitle">XP ${envoy.xp} • ${(getEnvoyBonusRate(envoy) * 100).toFixed(1)}% better pricing on specialty commodity</p>
-          </article>
-        `)
-        .join("");
-
-  dom.envoysContent.innerHTML = `
+function renderRouteCard(route, kicker) {
+  const system = route.system;
+  const tripTime = formatSeconds(Math.round(system.distance * BALANCE.TRADE_TIME_PER_DISTANCE * 2));
+  const bestOutProfit = route.bestOutbound.margin * BALANCE.BASE_CARGO_SIZE;
+  const bestBackProfit = route.bestReturn.margin * BALANCE.BASE_CARGO_SIZE;
+  const matchingContracts = gameState.contracts.filter((contract) => contract.systemId === system.id);
+  return `
     <article class="card">
       <div class="card-head">
         <div>
-          <h3 class="card-title">Trade Envoy Bureau</h3>
-          <p class="section-subtitle">Recruit envoys with reputation earned from completed corporate contracts.</p>
+          <p class="eyebrow">${escapeHtml(kicker)}</p>
+          <h3>${escapeHtml(system.name)}</h3>
         </div>
-        <span class="badge">${gameState.reputationPoints || 0} rep</span>
-      </div>
-      <div class="cards-grid">${recruitMarkup}</div>
-    </article>
-    ${rosterMarkup}
-  `;
-}
-
-function renderSystems() {
-  const discovered = getDiscoveredRemoteSystems(gameState);
-  const home = getHomeSystem(gameState);
-
-  if (discovered.length === 0) {
-    dom.systemsList.innerHTML = '<div class="empty">No remote systems discovered yet.</div>';
-    return;
-  }
-
-  const rankedSystems = getRankedDiscoveredSystems(gameState);
-  const bestProfitSystem = rankedSystems[0] || null;
-  const ratioRankedSystems = rankedSystems.slice().sort(compareSystemsByRatio);
-  const bestRatioSystem =
-    ratioRankedSystems.find((item) => item.system.id !== bestProfitSystem?.system.id) ||
-    ratioRankedSystems[0] ||
-    null;
-  const featuredSystems = [];
-  for (const item of [bestProfitSystem, bestRatioSystem]) {
-    if (item && !featuredSystems.some((entry) => entry.system.id === item.system.id)) {
-      featuredSystems.push(item);
-    }
-  }
-
-  const cards = featuredSystems
-    .map((item, index) => renderSystemSummaryCard(item, index === 0 ? "Best Profit Route" : "Best Profit / Distance"))
-    .join("");
-
-  dom.systemsList.innerHTML = `
-    <div class="systems-simple-grid">${cards}</div>
-    <button class="btn secondary" id="openSystemsModalBtn" type="button">View All Discovered Systems</button>
-  `;
-}
-
-function getSystemRouteSummary(system, home) {
-  const bestOutbound = bestCommodityForSystem(system, home);
-  const bestReturn = bestReturnCommodityForSystem(system, home);
-  const bestOutboundTrip = bestOutbound.margin * gameState.cargoSize;
-  const bestReturnTrip = bestReturn.margin * gameState.cargoSize;
-  const roundTripProfit = bestOutboundTrip + bestReturnTrip;
-  const profitDistanceRatio = roundTripProfit / Math.max(0.1, system.distance);
-
-  return {
-    system,
-    bestOutbound,
-    bestReturn,
-    bestOutboundTrip,
-    bestReturnTrip,
-    roundTripProfit,
-    profitDistanceRatio
-  };
-}
-
-function compareSystemsByProfit(a, b) {
-  return b.roundTripProfit - a.roundTripProfit || a.system.distance - b.system.distance || a.system.name.localeCompare(b.system.name);
-}
-
-function compareSystemsByRatio(a, b) {
-  return b.profitDistanceRatio - a.profitDistanceRatio || a.system.distance - b.system.distance || b.roundTripProfit - a.roundTripProfit || a.system.name.localeCompare(b.system.name);
-}
-
-function compareSystemsByDistance(a, b) {
-  return a.system.distance - b.system.distance || b.roundTripProfit - a.roundTripProfit || a.system.name.localeCompare(b.system.name);
-}
-
-function getRankedDiscoveredSystems(state) {
-  const home = getHomeSystem(state);
-  return getDiscoveredRemoteSystems(state)
-    .map((system) => getSystemRouteSummary(system, home))
-    .sort(compareSystemsByProfit);
-}
-
-function renderSystemSummaryCard(item, kicker, options = {}) {
-  const { system, bestOutbound, bestReturn, bestOutboundTrip, bestReturnTrip, roundTripProfit, profitDistanceRatio } = item;
-  const bestOutboundClass = bestOutboundTrip >= 0 ? "pos" : "neg";
-  const bestReturnClass = bestReturnTrip >= 0 ? "pos" : "neg";
-  const totalBestClass = roundTripProfit >= 0 ? "pos" : "neg";
-  const matchingContracts = options.includeContracts
-    ? (gameState.corporateContracts || []).filter((contract) => contract.systemId === system.id)
-    : [];
-  const contractMarkup = matchingContracts.length > 0
-    ? `<div class="stack">${matchingContracts
-        .map((contract) => {
-          const commodity = COMMODITY_INDEX[contract.commodityId];
-          const remainingUnits = Math.max(0, contract.targetUnits - contract.deliveredUnits);
-          return `<p class="section-subtitle"><strong>Contract:</strong> ${commodity ? renderCommodityLabel(contract.commodityId, system) : ""} • ${remainingUnits}/${contract.targetUnits} units left • ${formatCredits(contract.bounty)}</p>`;
-        })
-        .join("")}</div>`
-    : "";
-
-  return `
-    <article class="system-simple-card">
-      <div class="system-row">
-        <h3 class="card-title">${system.name}</h3>
         <span class="badge">${formatDistanceLy(system.distance)}</span>
       </div>
-      <p class="section-subtitle">${kicker}</p>
-      ${contractMarkup}
-      <p class="section-subtitle">Best Out: ${renderCommodityLabel(bestOutbound.commodityId, system)} <span class="${bestOutboundClass}">(${bestOutboundTrip >= 0 ? "+" : ""}${formatCredits(bestOutboundTrip)})</span></p>
-      <p class="section-subtitle">Best Back: ${renderCommodityLabel(bestReturn.commodityId, system)} <span class="${bestReturnClass}">(${bestReturnTrip >= 0 ? "+" : ""}${formatCredits(bestReturnTrip)})</span></p>
-      <div class="system-row">
-        <p class="section-subtitle">Round-Trip ${formatSeconds(getTradeMissionDuration(system.distance))} | <span class="${totalBestClass}">${roundTripProfit >= 0 ? "+" : ""}${formatCredits(roundTripProfit)}</span> | Ratio ${profitDistanceRatio.toFixed(1)}</p>
-        <button class="btn open-trade-planner-btn" data-system-id="${system.id}" type="button">Plan Trade</button>
+      <p class="metric-line">Best outbound: ${renderCommodityLabel(route.bestOutbound.commodityId, system)} <span class="${bestOutProfit >= 0 ? "pos" : "neg"}">${bestOutProfit >= 0 ? "+" : ""}${formatCredits(bestOutProfit)}</span></p>
+      <p class="metric-line">Best return: ${renderCommodityLabel(route.bestReturn.commodityId, system)} <span class="${bestBackProfit >= 0 ? "pos" : "neg"}">${bestBackProfit >= 0 ? "+" : ""}${formatCredits(bestBackProfit)}</span></p>
+      <p class="metric-line">Round trip: <strong>${route.roundTripProfit >= 0 ? "+" : ""}${formatCredits(route.roundTripProfit)}</strong> • ${tripTime}</p>
+      ${matchingContracts.length > 0 ? matchingContracts.map((contract) => `<p class="metric-line"><strong>Contract:</strong> ${renderCommodityLabel(contract.commodityId, system)} • ${Math.max(0, contract.targetUnits - contract.deliveredUnits)}/${contract.targetUnits} units • ${formatCredits(contract.bounty)}</p>`).join("") : ""}
+      <div class="inline-actions">
+        <button class="btn plan-trade-btn" data-system-id="${system.id}" type="button">Plan Trade</button>
       </div>
-    </article>`;
+    </article>
+  `;
 }
 
-function renderSystemsModal() {
-  if (!dom.systemsModalContent) {
-    return;
+function renderTradeSection() {
+  const featured = getFeaturedSystems(gameState);
+  return `
+    <section class="section-modal-body">
+      <article class="notice-box">
+        <p class="section-subtitle">Buy cargo at Sol Nexus, dispatch ships, and compare the two strongest routes on the board right now.</p>
+      </article>
+      <article class="card">
+        <div class="section-head">
+          <div>
+            <h3>Sol Nexus Market</h3>
+            <p class="section-subtitle">Current home buy prices.</p>
+          </div>
+        </div>
+        ${renderHomeMarketTable()}
+      </article>
+      <div class="route-grid">
+        ${featured.length > 0 ? featured.map((route, index) => renderRouteCard(route, index === 0 ? "Best Profit Route" : "Best Profit / Distance")).join("") : '<div class="empty">No remote systems are available yet.</div>'}
+      </div>
+    </section>
+  `;
+}
+
+function renderNavigationSection() {
+  const discovered = getDiscoveredRemoteSystems(gameState)
+    .map((system) => ({ system, ...getRouteStats(gameState, system) }))
+    .sort((a, b) => {
+      if (navigationSort === "profit") {
+        return b.roundTripProfit - a.roundTripProfit || a.system.distance - b.system.distance;
+      }
+      if (navigationSort === "ratio") {
+        return b.profitPerDistance - a.profitPerDistance || a.system.distance - b.system.distance;
+      }
+      return a.system.distance - b.system.distance;
+    });
+  const totalDiscovered = getDiscoveredRemoteSystems(gameState).length;
+  return `
+    <section class="section-modal-body">
+      <article class="card">
+        <div class="section-head">
+          <div>
+            <h3>Scout Operations</h3>
+            <p class="section-subtitle">Discovery progress: ${totalDiscovered} / ${BALANCE.REMOTE_SYSTEM_COUNT} systems</p>
+          </div>
+          <button class="btn" data-action="launch-scout" type="button" ${!gameState.scoutShip.owned || gameState.scoutShip.status !== "idle" || getUndiscoveredSystems(gameState).length === 0 ? "disabled" : ""}>${!gameState.scoutShip.owned ? `Buy scout in Shipyard` : getUndiscoveredSystems(gameState).length === 0 ? "All Systems Mapped" : "Launch Scout Mission"}</button>
+        </div>
+        <p class="metric-line">Scout ship: <strong>${!gameState.scoutShip.owned ? "Not owned" : gameState.scoutShip.status === "mission" ? `On mission • ${formatSeconds(gameState.scoutMission?.remainingSeconds || 0)} remaining` : "Idle"}</strong></p>
+        ${gameState.scoutShip.owned ? `<p class="metric-line">Next mission duration: ${formatSeconds(getScoutMissionDuration(gameState))}</p>` : ""}
+      </article>
+      <article class="card">
+        <div class="section-head">
+          <div>
+            <h3>All Discovered Systems</h3>
+            <p class="section-subtitle">Sort by distance, raw profit, or profit efficiency.</p>
+          </div>
+          <div class="filter-row">
+            <button class="pill-btn sort-systems-btn" data-sort="distance" type="button">Distance</button>
+            <button class="pill-btn sort-systems-btn" data-sort="profit" type="button">Profit</button>
+            <button class="pill-btn sort-systems-btn" data-sort="ratio" type="button">Profit / LY</button>
+          </div>
+        </div>
+        <div class="cards-grid">
+          ${discovered.map((route) => renderRouteCard(route, "Route Overview")).join("") || '<div class="empty">No systems discovered yet.</div>'}
+        </div>
+      </article>
+    </section>
+  `;
+}
+
+function renderFleetMissionCard(batch) {
+  const missions = gameState.tradeMissions.filter((mission) => mission.batchId === batch.id);
+  if (missions.length === 0) {
+    return "";
   }
+  const destination = findSystem(gameState, batch.destinationSystemId);
+  const lead = missions[0];
+  const outboundEta = Math.max(0, ...missions.filter((mission) => !mission.arrivalResolved).map((mission) => mission.remainingSeconds - Math.floor(mission.durationSeconds / 2)), 0);
+  const returnEta = Math.max(0, ...missions.map((mission) => mission.remainingSeconds), 0);
+  const groupedBySpeed = Object.values(missions.reduce((acc, mission) => {
+    const key = `${mission.durationSeconds}`;
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(mission);
+    return acc;
+  }, {}));
+  const envoy = batch.envoyId ? findTradeEnvoy(gameState, batch.envoyId) : null;
+  return `
+    <article class="mission-item">
+      <div class="card-head">
+        <div>
+          <h3>${escapeHtml(destination?.name || "Unknown Route")}</h3>
+          <p class="section-subtitle">${renderCommodityLabel(batch.outboundCommodityId, destination || getHomeSystem(gameState))} out • ${renderCommodityLabel(batch.returnCommodityId, destination || getHomeSystem(gameState))} back</p>
+        </div>
+        <span class="badge">${batch.totalShips} ships</span>
+      </div>
+      <p class="mission-meta">Outbound ETA: ${formatSeconds(outboundEta)} • Return ETA: ${formatSeconds(returnEta)}</p>
+      <p class="mission-meta">Estimated ${batch.financed ? "(after interest)" : ""}: <span class="${batch.estimatedProfitAfterInterest >= 0 ? "pos" : "neg"}">${batch.estimatedProfitAfterInterest >= 0 ? "+" : ""}${formatCredits(batch.estimatedProfitAfterInterest)}</span></p>
+      ${envoy ? `<p class="mission-meta">Envoy: ${escapeHtml(envoy.name)} • ${escapeHtml(getEnvoySpecialtyLabel(envoy))}</p>` : ""}
+      ${groupedBySpeed.map((group) => `<div class="notice-box"><p class="mission-meta"><strong>Speed Group</strong> • ${formatSeconds(group[0].durationSeconds)} total</p><p class="mission-meta">${group.map((mission) => {
+        const ship = findMerchantShip(gameState, mission.shipId);
+        return `<span style="color:${ship?.nameColor || "#fff"}">${escapeHtml(getShipDisplayName(ship))}</span>`;
+      }).join(", ")}</p></div>`).join("")}
+    </article>
+  `;
+}
 
-  const rankedSystems = getRankedDiscoveredSystems(gameState);
-  if (rankedSystems.length === 0) {
-    dom.systemsModalContent.innerHTML = '<div class="empty">No remote systems discovered yet.</div>';
-    return;
+function renderFleetSection() {
+  const batches = Object.values(gameState.tradeMissionBatches);
+  const totalEscrow = gameState.tradeMissions.reduce((sum, mission) => sum + (mission.arrivalResolved ? 0 : mission.escrowReserved), 0);
+  return `
+    <section class="section-modal-body split-grid">
+      <article class="card">
+        <div class="section-head">
+          <div>
+            <h3>Active Trade Missions</h3>
+            <p class="section-subtitle">Grouped by mission batch. Ships with different speeds stay grouped only when their duration matches.</p>
+          </div>
+        </div>
+        <p class="metric-line">Total mission escrow reserved: ${formatCredits(totalEscrow)}</p>
+        <div class="cards-grid">
+          ${batches.length > 0 ? batches.map((batch) => renderFleetMissionCard(batch)).join("") : '<div class="empty">No active trade missions.</div>'}
+        </div>
+      </article>
+      <article class="card">
+        <div class="section-head">
+          <div>
+            <h3>Support Operations</h3>
+            <p class="section-subtitle">Upgrades, scout work, and idle capacity.</p>
+          </div>
+        </div>
+        <p class="mission-meta">Idle merchant ships: ${getIdleMerchantShips(gameState).length} / ${gameState.merchantShips.length}</p>
+        <p class="mission-meta">Idle trade envoys: ${getIdleTradeEnvoys(gameState).length} / ${gameState.tradeEnvoys.length}</p>
+        <p class="mission-meta">Scout status: ${!gameState.scoutShip.owned ? "Not owned" : gameState.scoutShip.status === "mission" ? `On mission • ${formatSeconds(gameState.scoutMission?.remainingSeconds || 0)}` : "Idle"}</p>
+        <div class="cards-grid">
+          ${gameState.upgradeMissions.length > 0 ? gameState.upgradeMissions.map((mission) => {
+            const ship = findMerchantShip(gameState, mission.shipId);
+            return `<article class="mission-item"><h3>${escapeHtml(getShipDisplayName(ship))}</h3><p class="mission-meta">${mission.upgradeType} refit • ${formatSeconds(mission.remainingSeconds)} remaining</p></article>`;
+          }).join("") : '<div class="empty">No ships are currently in refit.</div>'}
+        </div>
+      </article>
+    </section>
+  `;
+}
+
+function renderShipyardSection() {
+  const nextShipCost = getMerchantShipCostForCount(gameState.merchantShips.length);
+  return `
+    <section class="section-modal-body split-grid">
+      <article class="card">
+        <div class="section-head">
+          <div>
+            <h3>Merchant Ship Procurement</h3>
+            <p class="section-subtitle">Level progression increases your fleet cap. Ship purchases stop at the current cap.</p>
+          </div>
+          <button class="btn" data-action="buy-merchant-ship" type="button" ${gameState.credits < nextShipCost || gameState.merchantShips.length >= gameState.maxMerchantShips ? "disabled" : ""}>Buy Ship (${formatCredits(nextShipCost)})</button>
+        </div>
+        <p class="metric-line">Owned ships: ${gameState.merchantShips.length} / ${gameState.maxMerchantShips}</p>
+        <p class="metric-line">Next cap increase: every non-third level grants +1 max merchant ship.</p>
+      </article>
+      <article class="card">
+        <div class="section-head">
+          <div>
+            <h3>Scout Procurement</h3>
+            <p class="section-subtitle">Reveal more profitable systems over time.</p>
+          </div>
+          <button class="btn" data-action="buy-scout-ship" type="button" ${gameState.scoutShip.owned || gameState.credits < BALANCE.SCOUT_SHIP_COST ? "disabled" : ""}>${gameState.scoutShip.owned ? "Owned" : `Buy Scout (${formatCredits(BALANCE.SCOUT_SHIP_COST)})`}</button>
+        </div>
+        <p class="metric-line">Scout ship status: ${!gameState.scoutShip.owned ? "Not owned" : gameState.scoutShip.status === "mission" ? "On mission" : "Idle"}</p>
+      </article>
+    </section>
+  `;
+}
+
+function getHangarDraft(ship) {
+  return hangarDrafts[ship.id] || { name: ship.name, color: ship.nameColor };
+}
+
+function renderHangarSection() {
+  return `
+    <section class="section-modal-body">
+      <div class="ship-grid">
+        ${gameState.merchantShips.map((ship) => {
+          const isOpen = hangarExpandedShipId === ship.id;
+          const draft = getHangarDraft(ship);
+          return `
+            <article class="ship-card">
+              <div class="ship-row">
+                <div>
+                  <h3 style="color:${ship.nameColor}">${escapeHtml(getShipDisplayName(ship))}</h3>
+                  <p class="section-subtitle">Cargo ${getShipCargoUnits(ship)} units • Speed x${getShipSpeedMultiplier(ship).toFixed(2)} • ${escapeHtml(ship.status)}</p>
+                </div>
+                <button class="btn secondary toggle-hangar-btn" data-ship-id="${ship.id}" type="button">${isOpen ? "Hide Details" : "Customize / Upgrade"}</button>
+              </div>
+              ${isOpen ? `
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="ship-name-${ship.id}">Ship Name</label>
+                    <input id="ship-name-${ship.id}" class="text-input hangar-name-input" data-ship-id="${ship.id}" type="text" maxlength="${SHIP_NAME_MAX_LENGTH}" value="${escapeHtml(draft.name)}" />
+                  </div>
+                  <div>
+                    <div class="field"><label>Ship Name Color</label></div>
+                    <div class="color-swatch-grid">
+                      ${SHIP_NAME_COLOR_OPTIONS.map((option) => `<button class="color-swatch choose-ship-color-btn ${draft.color === option.value ? "active" : ""}" data-ship-id="${ship.id}" data-color="${option.value}" type="button" style="color:${option.value}">${escapeHtml(option.label)}</button>`).join("")}
+                    </div>
+                  </div>
+                  <div class="inline-actions">
+                    <button class="btn save-ship-style-btn" data-ship-id="${ship.id}" type="button">Save Customization</button>
+                    <button class="btn secondary start-upgrade-btn" data-upgrade-type="cargo" data-ship-id="${ship.id}" type="button" ${ship.status !== "idle" || gameState.credits < getUpgradeCost(ship, "cargo") ? "disabled" : ""}>Cargo Upgrade (${formatCredits(getUpgradeCost(ship, "cargo"))})</button>
+                    <button class="btn secondary start-upgrade-btn" data-upgrade-type="speed" data-ship-id="${ship.id}" type="button" ${ship.status !== "idle" || gameState.credits < getUpgradeCost(ship, "speed") ? "disabled" : ""}>Speed Upgrade (${formatCredits(getUpgradeCost(ship, "speed"))})</button>
+                  </div>
+                  <p class="metric-line">Upgrade times: cargo ${formatSeconds(getUpgradeDuration(ship, "cargo"))} • speed ${formatSeconds(getUpgradeDuration(ship, "speed"))}</p>
+                </div>
+              ` : ""}
+            </article>
+          `;
+        }).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderContractsSection() {
+  return `
+    <section class="section-modal-body">
+      <article class="card">
+        <div class="section-head">
+          <div>
+            <h3>Station Reputation</h3>
+            <p class="section-subtitle">Reputation is XP. Level up to increase fleet cap and earn automatic Trade Envoys.</p>
+          </div>
+          <span class="badge">Level ${gameState.playerLevel}</span>
+        </div>
+        <p class="metric-line">Total reputation: ${gameState.playerReputationXp}</p>
+        <div class="progress-line"><div class="progress-fill" style="width:${getReputationProgress(gameState.playerLevel, gameState.playerReputationXp).pct}%"></div></div>
+      </article>
+      <div class="cards-grid">
+        ${gameState.contracts.map((contract) => {
+          const system = findSystem(gameState, contract.systemId);
+          const remaining = Math.max(0, contract.targetUnits - contract.deliveredUnits);
+          const progress = clamp((contract.deliveredUnits / Math.max(1, contract.targetUnits)) * 100, 0, 100);
+          return `
+            <article class="contract-card">
+              <div class="card-head">
+                <div>
+                  <h3>${escapeHtml(contract.issuer)}</h3>
+                  <p class="section-subtitle">${escapeHtml(contract.headline)}</p>
+                </div>
+                <span class="badge">${contract.difficulty === 1 ? "Easy" : contract.difficulty === 2 ? "Standard" : "Hard"}</span>
+              </div>
+              <p class="contract-meta">${renderCommodityLabel(contract.commodityId, system || getHomeSystem(gameState))} to <strong>${escapeHtml(system?.name || "Unknown")}</strong></p>
+              <p class="contract-meta">${escapeHtml(contract.body)}</p>
+              <p class="contract-meta">Need ${contract.targetUnits} units • Remaining ${remaining} • Deadline ${formatSeconds(contract.remainingSeconds)}</p>
+              <p class="contract-meta">Reward: ${formatCredits(contract.bounty)} • ${contract.reputationReward} reputation</p>
+              <div class="progress-line"><div class="progress-fill" style="width:${progress}%"></div></div>
+            </article>
+          `;
+        }).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderEnvoysSection() {
+  return `
+    <section class="section-modal-body">
+      <article class="card">
+        <div class="section-head">
+          <div>
+            <h3>Automatic Envoy Grants</h3>
+            <p class="section-subtitle">Every third player level grants the next envoy in a fixed sector order: single-commodity envoys first, then two-commodity envoys.</p>
+          </div>
+          <span class="badge">Next Grant #${gameState.nextEnvoyGrantIndex + 1}</span>
+        </div>
+      </article>
+      <div class="cards-grid">
+        ${gameState.tradeEnvoys.length > 0 ? gameState.tradeEnvoys.map((envoy) => `
+          <article class="envoy-card">
+            <div class="card-head">
+              <div>
+                <h3>${escapeHtml(envoy.name)}</h3>
+                <p class="section-subtitle">${escapeHtml(getEnvoySpecialtyLabel(envoy))}</p>
+              </div>
+              <span class="badge">Level ${getTradeEnvoyLevel(envoy.xp)}</span>
+            </div>
+            <p class="envoy-meta">Bonus: ${(getTradeEnvoyBonusRate(envoy) * 100).toFixed(1)}% better pricing</p>
+            <p class="envoy-meta">XP: ${envoy.xp} • Status: ${envoy.status === "idle" ? "Idle" : `On mission to ${findSystem(gameState, gameState.tradeMissionBatches[envoy.assignedBatchId]?.destinationSystemId)?.name || "route"}`}</p>
+          </article>
+        `).join("") : '<div class="empty">No envoys on the roster yet. Reach level 3 for your first envoy.</div>'}
+      </div>
+    </section>
+  `;
+}
+
+function buildProfitTrendSvg(entries) {
+  if (entries.length === 0) {
+    return '<div class="empty">Complete a few trade missions to build a profit trend.</div>';
   }
-
-  const comparators = {
-    distance: compareSystemsByDistance,
-    profit: compareSystemsByProfit,
-    ratio: compareSystemsByRatio
-  };
-  const sortedSystems = rankedSystems.slice().sort(comparators[systemsModalSort] || compareSystemsByProfit);
-  const sortButtons = [
-    ["distance", "Distance"],
-    ["profit", "Profit"],
-    ["ratio", "Profit / Distance Ratio"]
-  ]
-    .map(([value, label]) => `<button type="button" class="btn secondary systems-sort-btn ${systemsModalSort === value ? "active-filter" : ""}" data-sort-value="${value}">${label}</button>`)
-    .join("");
-
-  dom.systemsModalContent.innerHTML = `
-    <div class="sort-row">${sortButtons}</div>
-    <div class="systems-simple-grid">
-      ${sortedSystems.map((item) => renderSystemSummaryCard(item, "Route Overview", { includeContracts: true })).join("")}
+  const width = 320;
+  const height = 140;
+  const profits = entries.map((item) => item.profit);
+  const min = Math.min(...profits, 0);
+  const max = Math.max(...profits, 0, 1);
+  const span = Math.max(1, max - min);
+  const points = entries.map((item, index) => {
+    const x = (index / Math.max(1, entries.length - 1)) * (width - 20) + 10;
+    const y = height - 18 - (((item.profit - min) / span) * (height - 36));
+    return `${x},${y}`;
+  }).join(" ");
+  const zeroY = height - 18 - (((0 - min) / span) * (height - 36));
+  return `
+    <div class="chart-box">
+      <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Profit trend">
+        <line x1="10" y1="${zeroY}" x2="${width - 10}" y2="${zeroY}" stroke="rgba(255,255,255,0.18)" stroke-width="1" />
+        <polyline fill="none" stroke="#4fe4ff" stroke-width="3" points="${points}" />
+      </svg>
     </div>
   `;
 }
 
-function openSystemsModal() {
-  if (!dom.systemsModal) {
-    return;
-  }
-  renderSystemsModal();
-  dom.systemsModal.classList.remove("hidden");
-  document.body.classList.add("modal-open");
+function buildCommodityMixSvg(history) {
+  const totals = Object.fromEntries(COMMODITIES.map((commodity) => [commodity.id, 0]));
+  history.forEach((item) => {
+    totals[item.outboundCommodityId] += item.outboundUnits || 0;
+    totals[item.returnCommodityId] += item.returnUnits || 0;
+  });
+  const max = Math.max(1, ...Object.values(totals));
+  const width = 320;
+  const height = 160;
+  const barWidth = 36;
+  const gap = 14;
+  return `
+    <div class="chart-box">
+      <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Commodity mix">
+        ${COMMODITIES.map((commodity, index) => {
+          const value = totals[commodity.id];
+          const barHeight = ((height - 40) * value) / max;
+          const x = 20 + index * (barWidth + gap);
+          const y = height - 24 - barHeight;
+          return `
+            <rect x="${x}" y="${y}" width="${barWidth}" height="${barHeight}" rx="8" fill="rgba(79,228,255,0.72)"></rect>
+            <text x="${x + barWidth / 2}" y="${height - 8}" text-anchor="middle" fill="#dfe8ff" font-size="12">${COMMODITY_ICONS[commodity.id]}</text>
+          `;
+        }).join("")}
+      </svg>
+      <div class="legend-row">${COMMODITIES.map((commodity) => `<span class="legend-pill">${COMMODITY_ICONS[commodity.id]} ${commodity.name}: ${totals[commodity.id]}</span>`).join("")}</div>
+    </div>
+  `;
 }
 
-function closeSystemsModal() {
-  if (!dom.systemsModal) {
-    return;
-  }
-  dom.systemsModal.classList.add("hidden");
-  if (
-    dom.tradeModal?.classList.contains("hidden") &&
-    dom.awayModal?.classList.contains("hidden") &&
-    dom.helpModal?.classList.contains("hidden")
-  ) {
-    document.body.classList.remove("modal-open");
-  }
+function renderAnalyticsSection() {
+  const history = gameState.tradeHistory.slice().reverse();
+  const totals = history.reduce((acc, item) => {
+    acc.revenue += item.revenue || 0;
+    acc.profit += item.profit || 0;
+    acc.financed += item.financed ? 1 : 0;
+    acc.contracts += item.contractDeliveryUnits > 0 ? 1 : 0;
+    acc.cargo += (item.outboundUnits || 0) + (item.returnUnits || 0);
+    return acc;
+  }, { revenue: 0, profit: 0, financed: 0, contracts: 0, cargo: 0 });
+  const topProfitRoutes = Object.values(history.reduce((acc, item) => {
+    const key = item.systemId;
+    if (!acc[key]) {
+      acc[key] = { systemId: item.systemId, profit: 0, ratio: 0, trips: 0 };
+    }
+    acc[key].profit += item.profit || 0;
+    acc[key].trips += 1;
+    const distance = findSystem(gameState, item.systemId)?.distance || 1;
+    acc[key].ratio += (item.profit || 0) / distance;
+    return acc;
+  }, {}))
+    .sort((a, b) => b.profit - a.profit)
+    .slice(0, 5);
+  const topRatioRoutes = Object.values(history.reduce((acc, item) => {
+    const key = item.systemId;
+    if (!acc[key]) {
+      acc[key] = { systemId: item.systemId, ratio: 0, trips: 0 };
+    }
+    const distance = findSystem(gameState, item.systemId)?.distance || 1;
+    acc[key].ratio += (item.profit || 0) / distance;
+    acc[key].trips += 1;
+    return acc;
+  }, {}))
+    .sort((a, b) => b.ratio - a.ratio)
+    .slice(0, 5);
+  return `
+    <section class="section-modal-body">
+      <div class="analytics-grid">
+        <article class="analytics-card"><h3>Lifetime Revenue</h3><p class="stat-value">${formatCredits(totals.revenue)}</p></article>
+        <article class="analytics-card"><h3>Lifetime Profit</h3><p class="stat-value ${totals.profit >= 0 ? "pos" : "neg"}">${totals.profit >= 0 ? "+" : ""}${formatCredits(totals.profit)}</p></article>
+        <article class="analytics-card"><h3>Financed Missions</h3><p class="stat-value">${totals.financed}</p></article>
+        <article class="analytics-card"><h3>Contract Routes Served</h3><p class="stat-value">${totals.contracts}</p></article>
+        <article class="analytics-card"><h3>Total Cargo Moved</h3><p class="stat-value">${totals.cargo}</p></article>
+        <article class="analytics-card"><h3>Systems Discovered</h3><p class="stat-value">${getDiscoveredRemoteSystems(gameState).length}</p></article>
+      </div>
+      <article class="card">
+        <div class="section-head"><div><h3>Recent Profit Trend</h3><p class="section-subtitle">Last 20 completed mission batches.</p></div></div>
+        ${buildProfitTrendSvg(history.slice(-20))}
+      </article>
+      <article class="card">
+        <div class="section-head"><div><h3>Commodity Mix</h3><p class="section-subtitle">Outbound and return cargo volume across all completed missions.</p></div></div>
+        ${buildCommodityMixSvg(history)}
+      </article>
+      <div class="split-grid">
+        <article class="card">
+          <div class="section-head"><div><h3>Top Profit Routes</h3></div></div>
+          ${topProfitRoutes.length > 0 ? topProfitRoutes.map((item) => `<p class="analytics-line"><strong>${escapeHtml(findSystem(gameState, item.systemId)?.name || "Unknown")}</strong> • ${formatCredits(item.profit)} • ${item.trips} trips</p>`).join("") : '<div class="empty">No trade history yet.</div>'}
+        </article>
+        <article class="card">
+          <div class="section-head"><div><h3>Best Profit / Distance</h3></div></div>
+          ${topRatioRoutes.length > 0 ? topRatioRoutes.map((item) => `<p class="analytics-line"><strong>${escapeHtml(findSystem(gameState, item.systemId)?.name || "Unknown")}</strong> • ${formatCredits(item.ratio)} per LY • ${item.trips} trips</p>`).join("") : '<div class="empty">No trade history yet.</div>'}
+        </article>
+      </div>
+    </section>
+  `;
 }
 
-function openHelpModal() {
-  if (!dom.helpModal) {
-    return;
-  }
-  dom.helpModal.classList.remove("hidden");
-  document.body.classList.add("modal-open");
+function renderNewsSection() {
+  const latestPermanent = gameState.structuralHistory[0];
+  return `
+    <section class="section-modal-body split-grid">
+      <article class="card">
+        <div class="section-head"><div><h3>Live Newsfeed</h3><p class="section-subtitle">Temporary events plus the single most recent permanent shift.</p></div></div>
+        <div class="cards-grid">
+          ${gameState.marketEvents.map((event) => {
+            const system = findSystem(gameState, event.systemId);
+            return `
+              <article class="news-item">
+                <div class="card-head">
+                  <div>
+                    <h3>${escapeHtml(event.headline)}</h3>
+                    <p class="section-subtitle">${escapeHtml(system?.name || "Unknown system")}</p>
+                  </div>
+                  <span class="badge">${formatSeconds(event.remainingSeconds)}</span>
+                </div>
+                <p class="section-subtitle">${renderCommodityLabel(event.commodityId, system || getHomeSystem(gameState))}</p>
+                <p class="section-subtitle">${escapeHtml(event.body)}</p>
+              </article>
+            `;
+          }).join("")}
+          ${latestPermanent ? `
+            <article class="news-item">
+              <div class="card-head">
+                <div>
+                  <h3>${escapeHtml(latestPermanent.headline)}</h3>
+                  <p class="section-subtitle">Most recent permanent shift</p>
+                </div>
+                <span class="badge">Permanent</span>
+              </div>
+              <p class="section-subtitle">${latestPermanent.type === "global" ? "Galaxy-wide" : escapeHtml(findSystem(gameState, latestPermanent.systemId)?.name || "Unknown system")}</p>
+              <p class="section-subtitle">${renderCommodityLabel(latestPermanent.commodityId, latestPermanent.systemId ? findSystem(gameState, latestPermanent.systemId) : getHomeSystem(gameState))}</p>
+              <p class="section-subtitle">${escapeHtml(latestPermanent.body)}</p>
+            </article>
+          ` : ""}
+        </div>
+      </article>
+      <article class="card">
+        <div class="section-head">
+          <div><h3>Event Log</h3><p class="section-subtitle">Recent missions, scouting, contracts, and permanent shifts.</p></div>
+          <button class="btn danger" data-action="reset-game" type="button">Reset Game</button>
+        </div>
+        <ul class="event-log scroll-log">
+          ${gameState.log.length > 0 ? gameState.log.map((entry) => `<li class="event-item">${escapeHtml(entry.text)}<br /><span class="section-subtitle">${new Date(entry.timestamp).toLocaleString()}</span></li>`).join("") : '<li class="empty">No events logged yet.</li>'}
+        </ul>
+        <div class="section-head" style="margin-top:0.9rem"><div><h3>Economic History</h3><p class="section-subtitle">All permanent structural changes.</p></div></div>
+        <div class="history-scroll">
+          ${gameState.structuralHistory.length > 0 ? gameState.structuralHistory.map((item) => `<article class="history-item"><strong>${escapeHtml(item.headline)}</strong><p class="section-subtitle">${item.type === "global" ? "Galaxy-wide" : escapeHtml(findSystem(gameState, item.systemId)?.name || "Unknown system")}</p><p class="section-subtitle">${renderCommodityLabel(item.commodityId, item.systemId ? findSystem(gameState, item.systemId) : getHomeSystem(gameState))}</p><p class="section-subtitle">${escapeHtml(item.body)}</p><p class="section-subtitle">${new Date(item.timestamp).toLocaleString()}</p></article>`).join("") : '<div class="empty">No permanent market shifts yet.</div>'}
+        </div>
+      </article>
+    </section>
+  `;
 }
 
-function closeHelpModal() {
-  if (!dom.helpModal) {
+function renderSection() {
+  if (!activeSection) {
     return;
   }
-  dom.helpModal.classList.add("hidden");
-  if (
-    dom.tradeModal?.classList.contains("hidden") &&
-    dom.awayModal?.classList.contains("hidden") &&
-    dom.systemsModal?.classList.contains("hidden")
-  ) {
-    document.body.classList.remove("modal-open");
+  const config = SECTION_CONFIG[activeSection];
+  dom.sectionModalKicker.textContent = config.kicker;
+  dom.sectionModalTitle.textContent = config.title;
+  let html = "";
+  switch (activeSection) {
+    case "trade":
+      html = renderTradeSection();
+      break;
+    case "navigation":
+      html = renderNavigationSection();
+      break;
+    case "fleet":
+      html = renderFleetSection();
+      break;
+    case "shipyard":
+      html = renderShipyardSection();
+      break;
+    case "hangar":
+      html = renderHangarSection();
+      break;
+    case "contracts":
+      html = renderContractsSection();
+      break;
+    case "envoys":
+      html = renderEnvoysSection();
+      break;
+    case "analytics":
+      html = renderAnalyticsSection();
+      break;
+    case "news":
+      html = renderNewsSection();
+      break;
+    default:
+      html = "";
   }
+  dom.sectionModalBody.innerHTML = html;
+}
+
+function openSection(sectionKey) {
+  activeSection = sectionKey;
+  renderSection();
+  dom.sectionModal.classList.remove("hidden");
+  dom.sectionModalBody.scrollTop = 0;
+  dom.sectionModal.scrollTop = 0;
+  syncBodyLock();
+}
+
+function closeSection() {
+  activeSection = null;
+  dom.sectionModal.classList.add("hidden");
+  syncBodyLock();
 }
 
 function renderTradePlanner() {
-  if (!dom.tradePlannerContent) {
-    return;
-  }
-
   if (!tradePlannerState) {
-    dom.tradePlannerContent.innerHTML = '<div class="empty">Select a system to plan a trade mission.</div>';
+    dom.tradePlannerContent.innerHTML = "";
     return;
   }
-
   const system = findSystem(gameState, tradePlannerState.systemId);
-  const home = getHomeSystem(gameState);
-  const idleShips = getIdleMerchantShips(gameState);
-  if (!system || !home) {
-    dom.tradePlannerContent.innerHTML = '<div class="empty">Selected system is no longer available.</div>';
-    return;
-  }
-
-  const outboundId = tradePlannerState.outboundCommodityId;
-  const returnId = tradePlannerState.returnCommodityId;
-  const selectedEnvoy = tradePlannerState.selectedEnvoyId ? findTradeEnvoy(gameState, tradePlannerState.selectedEnvoyId) : null;
-  const idleShipIds = new Set(idleShips.map((ship) => ship.id));
-  tradePlannerState.selectedShipIds = (tradePlannerState.selectedShipIds || []).filter((shipId) =>
-    idleShipIds.has(shipId)
-  );
-  const selectedShips = idleShips.filter((ship) => tradePlannerState.selectedShipIds.includes(ship.id));
-
-  const outboundBuy = applyEnvoyPriceModifier(home.prices[outboundId], selectedEnvoy, outboundId, "buy");
-  const outboundSell = applyEnvoyPriceModifier(system.prices[outboundId], selectedEnvoy, outboundId, "sell");
-  const returnBuy = applyEnvoyPriceModifier(system.prices[returnId], selectedEnvoy, returnId, "buy");
-  const returnSell = applyEnvoyPriceModifier(home.prices[returnId], selectedEnvoy, returnId, "sell");
-  const fullLoadPlan = buildTradeLoadPlan(
-    gameState,
-    selectedShips,
-    system.distance,
-    outboundBuy,
-    outboundSell,
-    returnBuy,
-    returnSell,
-    Number.POSITIVE_INFINITY,
-    false
-  );
-  const affordablePlan = buildTradeLoadPlan(
-    gameState,
-    selectedShips,
-    system.distance,
-    outboundBuy,
-    outboundSell,
-    returnBuy,
-    returnSell,
-    gameState.credits,
-    true
-  );
-  const totalMissionCost = fullLoadPlan.totalUpfrontCost;
-  const totalProfit = fullLoadPlan.totalEstimatedProfit;
-  const perShipMissionCost = selectedShips.length > 0 ? totalMissionCost / selectedShips.length : 0;
-  const durations = selectedShips.map((ship) => getShipTradeDuration(system.distance, ship));
-  const slowestDuration = durations.length > 0 ? Math.max(...durations) : getTradeMissionDuration(system.distance);
-  const fastestDuration = durations.length > 0 ? Math.min(...durations) : getTradeMissionDuration(system.distance);
-  const canLaunchFull = selectedShips.length > 0 && gameState.credits >= totalMissionCost;
-  const canLaunchPartial = selectedShips.length > 0 && affordablePlan.loadedUnits > 0 && affordablePlan.loadedUnits < fullLoadPlan.totalCapacityUnits;
-  const financeBorrowed = selectedShips.length > 0 ? Math.max(0, totalMissionCost - gameState.credits) : 0;
-  const financeInterest = selectedShips.length > 0
-    ? fullLoadPlan.plans.reduce((sum, plan) => sum + getMissionFinanceInterest(
-      (financeBorrowed * plan.upfrontCost) / Math.max(1, totalMissionCost),
-      plan.durationSeconds
-    ), 0)
-    : 0;
-  const financedProfit = totalProfit - financeInterest;
-  const canLaunchFinanced = selectedShips.length > 0 && financeBorrowed > 0 && fullLoadPlan.loadedUnits > 0;
-  const envoyButtons = (gameState.tradeEnvoys || []).length === 0
-    ? '<div class="empty">No Trade Envoys recruited yet. Complete Corporate Contracts to earn reputation and recruit one.</div>'
-    : ['<button type="button" class="ship-select-btn envoy-select-btn ' + (!selectedEnvoy ? 'active' : '') + '" data-envoy-id="">No Envoy</button>']
-        .concat(
-          (gameState.tradeEnvoys || []).map((envoy) => {
-            const active = tradePlannerState.selectedEnvoyId === envoy.id ? "active" : "";
-            const bonus = (getEnvoyBonusRate(envoy) * 100).toFixed(1);
-            return `<button type="button" class="ship-select-btn envoy-select-btn ${active}" data-envoy-id="${envoy.id}">
-              <span class="ship-select-name">${escapeHtml(envoy.name)}</span>
-              <span class="section-subtitle">${renderCommodityLabel(envoy.commodityId, system)} • Level ${getEnvoyLevel(envoy.xp)} • ${bonus}% better pricing</span>
-            </button>`;
-          })
-        )
-        .join("");
-
-  const outboundButtons = COMMODITIES.map((commodity) => {
-    const active = outboundId === commodity.id ? "active" : "";
-    return `
-      <button type="button" class="commodity-btn ${active}" data-planner-role="outbound" data-commodity-id="${commodity.id}">
-        <span class="commodity-icon">${COMMODITY_ICONS[commodity.id] || "⬡"}</span>
-        <span class="commodity-name">${commodity.name}</span>
-        <span class="commodity-tag ${getCommodityMarketLevel(system, commodity.id).className}">${getCommodityMarketLevel(system, commodity.id).label}</span>
-      </button>
-    `;
-  }).join("");
-
-  const returnButtons = COMMODITIES.map((commodity) => {
-    const active = returnId === commodity.id ? "active" : "";
-    return `
-      <button type="button" class="commodity-btn ${active}" data-planner-role="return" data-commodity-id="${commodity.id}">
-        <span class="commodity-icon">${COMMODITY_ICONS[commodity.id] || "⬡"}</span>
-        <span class="commodity-name">${commodity.name}</span>
-        <span class="commodity-tag ${getCommodityMarketLevel(system, commodity.id).className}">${getCommodityMarketLevel(system, commodity.id).label}</span>
-      </button>
-    `;
-  }).join("");
-
-  const shipButtons = idleShips.length === 0
-    ? '<div class="empty">No idle merchant ships available.</div>'
-    : idleShips
-        .map((ship) => {
-          const active = tradePlannerState.selectedShipIds.includes(ship.id) ? "active" : "";
-          return `
-      <button type="button" class="ship-select-btn ${active}" data-ship-id="${ship.id}">
-        <span class="ship-select-name" style="color:${ship.nameColor}">${escapeHtml(getShipDisplayName(ship))}</span>
-        <span class="section-subtitle">${ship.id.toUpperCase()} • ${getShipCargoUnits(gameState, ship)} units • ${(getShipSpeedMultiplier(ship) * 100).toFixed(0)}% time</span>
-      </button>
-    `;
-        })
-        .join("");
-
-  dom.tradePlannerContent.innerHTML = `
-    <div class="planner-grid">
-      <p class="section-subtitle"><strong>${system.name}</strong> • ${formatDistanceLy(system.distance)} • Round-trip ${formatSeconds(getTradeMissionDuration(system.distance))}</p>
-      <div>
-        <p class="section-subtitle">Outbound Cargo</p>
-        <div class="icon-grid">${outboundButtons}</div>
-      </div>
-      <div>
-        <p class="section-subtitle">Return Cargo</p>
-        <div class="icon-grid">${returnButtons}</div>
-      </div>
-      <div>
-        <p class="section-subtitle">Ships to Send</p>
-        ${idleShips.length > 0 ? `<button type="button" id="selectAllTradeShipsBtn" class="btn secondary">Select All Ships</button>` : ""}
-        <div class="ship-select-grid">${shipButtons}</div>
-      </div>
-      <div>
-        <p class="section-subtitle">Trade Envoy</p>
-        <div class="ship-select-grid">${envoyButtons}</div>
-      </div>
-      <p class="section-subtitle">Selected Ships: <strong>${selectedShips.length}</strong> / ${idleShips.length}</p>
-      <p class="section-subtitle">Selected Cargo: <strong>${fullLoadPlan.totalCapacityUnits} units full</strong>${canLaunchPartial ? ` • partial available <strong>${affordablePlan.loadedUnits} units</strong>` : ""}</p>
-      <p class="section-subtitle">Mission Duration Range: <strong>${formatSeconds(fastestDuration)} - ${formatSeconds(slowestDuration)}</strong></p>
-      <p class="section-subtitle">Per-Ship Mission Cost: <strong>${formatCredits(perShipMissionCost)}</strong></p>
-      <p class="section-subtitle">Upfront Cost: <strong>${formatCredits(totalMissionCost)}</strong></p>
-      <p class="section-subtitle">Estimated Result: <span class="${totalProfit >= 0 ? "pos" : "neg"}">${totalProfit >= 0 ? "+" : ""}${formatCredits(totalProfit)}</span></p>
-      ${canLaunchFinanced ? `<p class="section-subtitle">Finance Option: borrow <strong>${formatCredits(financeBorrowed)}</strong>, repay <strong>${formatCredits(financeBorrowed + financeInterest)}</strong>, financed result <span class="${financedProfit >= 0 ? "pos" : "neg"}">${financedProfit >= 0 ? "+" : ""}${formatCredits(financedProfit)}</span>.</p>` : ""}
-      <button type="button" id="launchPlannedTradeBtn" class="btn" ${canLaunchFull ? "" : "disabled"}>
-        ${selectedShips.length === 0 ? "Select At Least One Ship" : gameState.credits < totalMissionCost ? "Insufficient Credits for Full Load" : "Launch Full Load"}
-      </button>
-      ${canLaunchPartial ? `<button type="button" id="launchPartialTradeBtn" class="btn secondary">Launch Partial Load (${affordablePlan.loadedUnits} units)</button>` : ""}
-      ${canLaunchFinanced ? `<button type="button" id="launchFinancedTradeBtn" class="btn secondary">Finance Trade Mission (${formatCredits(financeBorrowed)})</button>` : ""}
-    </div>
-  `;
-}
-
-function renderFleet() {
-  const idle = getIdleMerchantShips(gameState).length;
-  const totalMissionEscrow = gameState.tradeMissions.reduce((sum, mission) => {
-    const missionEscrow = !mission.arrivalResolved && Number.isFinite(mission.escrowReserved)
-      ? mission.escrowReserved
-      : 0;
-    return sum + missionEscrow;
-  }, 0);
-  const missionGroups = Array.from(
-    gameState.tradeMissions.reduce((map, mission) => {
-      const groupKey = `${mission.batchId || mission.id}:${mission.durationSeconds}`;
-      if (!map.has(groupKey)) {
-        map.set(groupKey, []);
-      }
-      map.get(groupKey).push(mission);
-      return map;
-    }, new Map()).values()
-  );
-
-  const tradeMissionMarkup =
-    missionGroups.length === 0
-      ? '<div class="empty">No active trade missions.</div>'
-      : missionGroups
-          .map((missions) => {
-            const leadMission = missions[0];
-            const destination = findSystem(gameState, leadMission.destinationSystemId);
-            const potential = missions.reduce((sum, mission) => {
-              const missionPotential = Number.isFinite(mission.estimatedProfit)
-                ? mission.estimatedProfit
-                : (mission.outboundSellPrice - mission.outboundBuyPrice + (mission.returnSellPrice - mission.returnBuyPrice)) *
-                  mission.units;
-              return sum + missionPotential;
-            }, 0);
-            const missionEscrow = missions.reduce((sum, mission) => {
-              const reserved = !mission.arrivalResolved && Number.isFinite(mission.escrowReserved)
-                ? mission.escrowReserved
-                : 0;
-              return sum + reserved;
-            }, 0);
-            const borrowedAmount = missions.reduce((sum, mission) => sum + (mission.borrowedAmount || 0), 0);
-            const financeRepayment = missions.reduce((sum, mission) => sum + (mission.financeRepayment || 0), 0);
-            const slowestRemaining = Math.max(...missions.map((mission) => mission.remainingSeconds));
-            const fastestRemaining = Math.min(...missions.map((mission) => mission.remainingSeconds));
-            const progress = missions.reduce((sum, mission) => {
-              const elapsed = Math.max(0, mission.durationSeconds - mission.remainingSeconds);
-              return sum + Math.min(100, Math.max(0, (elapsed / mission.durationSeconds) * 100));
-            }, 0) / missions.length;
-            const shipMarkup = missions
-              .map((mission) => {
-                const ship = findMerchantShip(gameState, mission.shipId);
-                const halfDuration = Math.max(1, Math.floor(mission.durationSeconds / 2));
-                const outboundRemaining = mission.arrivalResolved
-                  ? 0
-                  : Math.max(0, mission.remainingSeconds - halfDuration);
-                const returnRemaining = mission.arrivalResolved
-                  ? Math.max(0, mission.remainingSeconds)
-                  : Math.max(0, Math.min(halfDuration, mission.remainingSeconds));
-                const phase = mission.arrivalResolved ? "Return" : "Outbound";
-                return `<div class="section-subtitle"><strong style="color:${ship?.nameColor || "#ffffff"}">${escapeHtml(
-                  ship ? getShipDisplayName(ship) : mission.shipId.toUpperCase()
-                )}</strong> (${mission.shipId.toUpperCase()}) • ${phase} • ETA ${formatSeconds(mission.remainingSeconds)} • ${mission.returnUnits || mission.units}/${mission.units} units</div>`;
-              })
-              .join("");
-
-            return `
-          <article class="mission-item">
-            <strong>${missions.length} ship${missions.length > 1 ? "s" : ""}</strong> <span class="section-subtitle"><-> ${destination ? destination.name : "Unknown"}</span><br />
-            Outbound: ${renderCommodityLabel(leadMission.outboundCommodityId, destination)} (${missions.reduce((sum, mission) => sum + mission.units, 0)} units)<br />
-            Return: ${renderCommodityLabel(leadMission.returnCommodityId, destination)} (${missions.reduce((sum, mission) => sum + (mission.returnUnits || mission.units), 0)} units)<br />
-            Escrow Reserved: <strong>${formatCredits(missionEscrow)}</strong><br />
-            ${financeRepayment > 0 ? `Financing: borrowed <strong>${formatCredits(borrowedAmount)}</strong>, repay <strong>${formatCredits(financeRepayment)}</strong><br />` : ""}
-            Fleet ETA: <strong>${formatSeconds(fastestRemaining)} - ${formatSeconds(slowestRemaining)}</strong><br />
-            <div class="progress-track"><div class="progress-fill" style="width:${progress.toFixed(1)}%"></div></div>
-            ${shipMarkup}
-            Estimated${financeRepayment > 0 ? " (after interest)" : ""}: <span class="${potential >= 0 ? "pos" : "neg"}">${potential >= 0 ? "+" : ""}${formatCredits(
-              potential
-            )}</span>
-          </article>
-        `;
-          })
-          .join("");
-
-  const upgradesMarkup =
-    gameState.upgradeMissions.length === 0
-      ? '<div class="empty">No active ship upgrades.</div>'
-      : gameState.upgradeMissions
-          .map((upgrade) => {
-            const ship = findMerchantShip(gameState, upgrade.shipId);
-            const progress = Math.min(
-              100,
-              Math.max(0, ((upgrade.durationSeconds - upgrade.remainingSeconds) / upgrade.durationSeconds) * 100)
-            );
-            return `
-          <article class="mission-item">
-            <strong style="color:${ship?.nameColor || "#ffffff"}">${escapeHtml(ship ? getShipDisplayName(ship) : upgrade.shipId.toUpperCase())}</strong> upgrading ${upgrade.upgradeType}<br />
-            ETA: <strong>${formatSeconds(upgrade.remainingSeconds)}</strong><br />
-            <div class="progress-track"><div class="progress-fill" style="width:${progress.toFixed(1)}%"></div></div>
-          </article>
-        `;
-          })
-          .join("");
-
-  let scoutPanel = "";
-  const discoveredRemoteCount = Math.max(0, getDiscoveredSystems(gameState).length - 1);
-  const totalRemoteSystems = gameState.systems.filter((system) => system.id !== gameState.homeSystemId).length;
-  if (!gameState.scoutShip.owned) {
-    scoutPanel = `<div class="empty">Scout ship not purchased.<br />Discovery progress: ${discoveredRemoteCount} / ${totalRemoteSystems} systems.</div>`;
-  } else if (gameState.scoutMission) {
-    const target = findSystem(gameState, gameState.scoutMission.targetSystemId);
-    scoutPanel = `
-      <article class="mission-item">
-        <strong>Scout Mission Active</strong><br />
-        Target region: ${target ? target.name : "Unknown"}<br />
-        ETA: <strong>${formatSeconds(gameState.scoutMission.remainingSeconds)}</strong><br />
-        Discovery progress: ${discoveredRemoteCount} / ${totalRemoteSystems} systems
-      </article>
-    `;
-  } else {
-    const remaining = getUndiscoveredSystems(gameState).length;
-    const nextDuration = formatSeconds(getScoutMissionDuration(gameState));
-    scoutPanel = `
-      <article class="mission-item">
-        <strong>Scout Ship Idle</strong><br />
-        Undiscovered systems: ${remaining}<br />
-        Discovery progress: ${discoveredRemoteCount} / ${totalRemoteSystems} systems<br />
-        Next mission duration: ${nextDuration}
-      </article>
-    `;
-  }
-
-  dom.fleetContent.innerHTML = `
-    <div class="stack">
-      <h3>Merchant Fleet</h3>
-      <p class="section-subtitle">Idle ships: ${idle} / ${gameState.merchantShips.length}</p>
-      <p class="section-subtitle">Total Mission Escrow Reserved: <strong>${formatCredits(totalMissionEscrow)}</strong></p>
-      ${tradeMissionMarkup}
-      <h3>Ship Upgrades</h3>
-      ${upgradesMarkup}
-    </div>
-    <div class="stack">
-      <h3>Scout Operations</h3>
-      ${scoutPanel}
-      <button type="button" id="launchScoutBtn" class="btn secondary" ${
-        !gameState.scoutShip.owned || Boolean(gameState.scoutMission) || getUndiscoveredSystems(gameState).length === 0
-          ? "disabled"
-          : ""
-      }>
-        ${getUndiscoveredSystems(gameState).length === 0 ? "All Systems Mapped" : "Launch Scout Mission"}
-      </button>
-    </div>
-  `;
-}
-
-function renderShipyard() {
-  const merchantDisabled = gameState.credits < gameState.nextMerchantShipCost;
-  const scoutDisabled = gameState.scoutShip.owned || gameState.credits < BALANCE.SCOUT_SHIP_COST;
-
-  dom.shipyardContent.innerHTML = `
-    <article class="action-row">
-      <div>
-        <h3>Merchant Ship</h3>
-        <p>Increases max simultaneous trade missions by 1.</p>
-      </div>
-      <button id="buyMerchantBtn" type="button" class="btn" ${merchantDisabled ? "disabled" : ""}>
-        Buy (${formatCredits(gameState.nextMerchantShipCost)})
-      </button>
-    </article>
-    <article class="action-row">
-      <div>
-        <h3>Scouting Ship</h3>
-        <p>One-time unlock for discovering new systems.</p>
-      </div>
-      <button id="buyScoutBtn" type="button" class="btn" ${scoutDisabled ? "disabled" : ""}>
-        ${gameState.scoutShip.owned ? "Owned" : `Buy (${formatCredits(BALANCE.SCOUT_SHIP_COST)})`}
-      </button>
-    </article>
-  `;
-}
-
-function renderHangar() {
-  const shipCards = gameState.merchantShips
-    .map((ship) => {
-      const cargoUnits = getShipCargoUnits(gameState, ship);
-      const speedMult = getShipSpeedMultiplier(ship);
-      const cargoUpgradeCost = getCargoUpgradeCost(ship);
-      const speedUpgradeCost = getSpeedUpgradeCost(ship);
-      const cargoUpgradeDuration = getUpgradeDurationSeconds(ship, "cargo");
-      const speedUpgradeDuration = getUpgradeDurationSeconds(ship, "speed");
-      const canUpgrade = ship.status === "idle";
-      const activeUpgrade = gameState.upgradeMissions.find((u) => u.shipId === ship.id) || null;
-      const isExpanded = expandedHangarShipIds.has(ship.id);
-
-      const colorSwatches = SHIP_NAME_COLOR_OPTIONS.map((colorOption) => {
-        const active = ship.nameColor === colorOption.value ? "active" : "";
-        return `
-          <button
-            type="button"
-            class="color-swatch-btn ${active}"
-            data-ship-id="${ship.id}"
-            data-color-value="${colorOption.value}"
-            style="color:${colorOption.value}; border-color:${colorOption.value};"
-          >
-            ${escapeHtml(colorOption.label)}
-          </button>
-        `;
-      }).join("");
-
-      return `
+  const ships = getIdleMerchantShips(gameState);
+  const selectedShips = tradePlannerState.selectedShipIds.map((id) => findMerchantShip(gameState, id)).filter(Boolean);
+  const envoy = tradePlannerState.selectedEnvoyId ? findTradeEnvoy(gameState, tradePlannerState.selectedEnvoyId) : null;
+  const fullPlan = system ? createTradeLoadPlan(gameState, selectedShips, system, tradePlannerState.outboundCommodityId, tradePlannerState.returnCommodityId, envoy, gameState.credits, false) : null;
+  const partialPlan = system ? createTradeLoadPlan(gameState, selectedShips, system, tradePlannerState.outboundCommodityId, tradePlannerState.returnCommodityId, envoy, gameState.credits, true) : null;
+  const borrowedAmount = fullPlan ? Math.max(0, fullPlan.totalUpfrontCost - gameState.credits) : 0;
+  const estimatedInterest = fullPlan ? fullPlan.plans.reduce((sum, plan) => sum + getMissionFinanceInterest(Math.round((borrowedAmount * plan.upfrontCost) / Math.max(1, fullPlan.totalUpfrontCost)), plan.durationSeconds), 0) : 0;
+  const idleEnvoys = getIdleTradeEnvoys(gameState);
+  dom.tradePlannerContent.innerHTML = !system ? '<div class="empty">Trade planner unavailable.</div>' : `
     <article class="card">
       <div class="card-head">
-        <h3 class="card-title" style="color:${ship.nameColor}">${escapeHtml(getShipDisplayName(ship))}</h3>
-        <span class="badge">${ship.id.toUpperCase()} • ${ship.status}</span>
+        <div>
+          <h3>${escapeHtml(system.name)}</h3>
+          <p class="section-subtitle">${formatDistanceLy(system.distance)} from Sol Nexus</p>
+        </div>
+        <span class="badge">${formatSeconds(Math.round(system.distance * BALANCE.TRADE_TIME_PER_DISTANCE * 2))} base trip</span>
       </div>
-      <p class="section-subtitle">Cargo: ${cargoUnits} units (L${ship.cargoLevel}) • Speed: ${(speedMult * 100).toFixed(0)}% travel time (L${ship.speedLevel})</p>
-      ${activeUpgrade ? `<p class="section-subtitle">Upgrade in progress: ${activeUpgrade.upgradeType} • ETA ${formatSeconds(activeUpgrade.remainingSeconds)}</p>` : ""}
-      <button class="btn secondary toggle-hangar-details-btn" data-ship-id="${ship.id}" type="button">
-        ${isExpanded ? "Hide Details" : "Customize / Upgrade"}
-      </button>
-      ${isExpanded ? `
-      <div class="form-row">
-        <label class="section-subtitle" for="ship-name-${ship.id}">Ship Name</label>
-        <input id="ship-name-${ship.id}" class="ship-input" type="text" maxlength="${SHIP_NAME_MAX_LENGTH}" value="${escapeHtml(ship.name)}" />
-        <label class="section-subtitle">Name Color</label>
-        <div class="color-swatch-grid">${colorSwatches}</div>
-        <input id="ship-color-${ship.id}" type="hidden" value="${ship.nameColor}" />
-        <button class="btn secondary save-ship-custom-btn" data-ship-id="${ship.id}" type="button">Save Name & Color</button>
+      <div class="split-grid">
+        <div class="form-grid">
+          <div>
+            <div class="field"><label>Outbound Cargo</label></div>
+            <div class="selector-grid">
+              ${COMMODITIES.map((commodity) => `<button class="selector-chip choose-outbound-btn ${tradePlannerState.outboundCommodityId === commodity.id ? "active" : ""}" data-commodity-id="${commodity.id}" type="button">${renderCommodityLabel(commodity.id, system)}</button>`).join("")}
+            </div>
+          </div>
+          <div>
+            <div class="field"><label>Return Cargo</label></div>
+            <div class="selector-grid">
+              ${COMMODITIES.map((commodity) => `<button class="selector-chip choose-return-btn ${tradePlannerState.returnCommodityId === commodity.id ? "active" : ""}" data-commodity-id="${commodity.id}" type="button">${renderCommodityLabel(commodity.id, system)}</button>`).join("")}
+            </div>
+          </div>
+          <div>
+            <div class="field"><label>Merchant Ships</label></div>
+            <div class="inline-actions"><button class="pill-btn select-all-ships-btn" type="button" ${ships.length === 0 ? "disabled" : ""}>Select All Ships</button></div>
+            <div class="ship-select-grid">
+              ${ships.length > 0 ? ships.map((ship) => `<button class="ship-select-btn toggle-ship-btn ${tradePlannerState.selectedShipIds.includes(ship.id) ? "active" : ""}" data-ship-id="${ship.id}" type="button"><strong style="color:${ship.nameColor}">${escapeHtml(getShipDisplayName(ship))}</strong><div class="section-subtitle">Cargo ${getShipCargoUnits(ship)} • Trip ${formatSeconds(getTradeDurationForShip(system.distance, ship))}</div></button>`).join("") : '<div class="empty">No idle merchant ships available.</div>'}
+            </div>
+          </div>
+          <div>
+            <div class="field"><label>Trade Envoy</label></div>
+            <div class="selector-grid">
+              <button class="selector-chip choose-envoy-btn ${!tradePlannerState.selectedEnvoyId ? "active" : ""}" data-envoy-id="" type="button">No Envoy</button>
+              ${idleEnvoys.map((item) => `<button class="selector-chip choose-envoy-btn ${tradePlannerState.selectedEnvoyId === item.id ? "active" : ""}" data-envoy-id="${item.id}" type="button"><strong>${escapeHtml(item.name)}</strong><div class="section-subtitle">${escapeHtml(getEnvoySpecialtyLabel(item))} • L${getTradeEnvoyLevel(item.xp)} • ${(getTradeEnvoyBonusRate(item) * 100).toFixed(1)}%</div></button>`).join("")}
+            </div>
+          </div>
+        </div>
+        <div class="form-grid">
+          <article class="notice-box">
+            <h3>Mission Cost</h3>
+            <p class="metric-line">Selected ships: ${selectedShips.length}</p>
+            <p class="metric-line">Loaded units: ${fullPlan?.loadedUnits || 0} / ${fullPlan?.totalCapacity || 0}</p>
+            <p class="metric-line">Full mission cost: ${formatCredits(fullPlan?.totalUpfrontCost || 0)}</p>
+            <p class="metric-line">Estimated outbound sale revenue: ${formatCredits(fullPlan?.totalEstimatedOutboundRevenue || 0)}</p>
+            <p class="metric-line">Estimated return cost: ${formatCredits(fullPlan?.totalEstimatedReturnCost || 0)}</p>
+            <p class="metric-line">Finance shortfall: ${borrowedAmount > 0 ? formatCredits(borrowedAmount) : "None"}</p>
+            <p class="metric-line">Estimated interest: ${borrowedAmount > 0 ? formatCredits(estimatedInterest) : "0 cr"}</p>
+            <p class="metric-line">Projected result ${borrowedAmount > 0 ? "(after interest)" : ""}: <span class="${(fullPlan?.totalEstimatedProfit || 0) - estimatedInterest >= 0 ? "pos" : "neg"}">${((fullPlan?.totalEstimatedProfit || 0) - estimatedInterest) >= 0 ? "+" : ""}${formatCredits((fullPlan?.totalEstimatedProfit || 0) - estimatedInterest)}</span></p>
+          </article>
+          <div class="inline-actions">
+            <button class="btn launch-mission-btn" data-mode="full" type="button" ${(selectedShips.length === 0 || !fullPlan || fullPlan.totalUpfrontCost > gameState.credits || fullPlan.loadedUnits <= 0) ? "disabled" : ""}>Launch Full Mission</button>
+            <button class="btn secondary launch-mission-btn" data-mode="partial" type="button" ${(selectedShips.length === 0 || !partialPlan || partialPlan.loadedUnits <= 0 || partialPlan.loadedUnits >= (fullPlan?.loadedUnits || 0)) ? "disabled" : ""}>Launch Partial Load (${partialPlan?.loadedUnits || 0} units)</button>
+            <button class="btn secondary launch-mission-btn" data-mode="finance" type="button" ${(selectedShips.length === 0 || !fullPlan || fullPlan.loadedUnits <= 0 || borrowedAmount <= 0) ? "disabled" : ""}>Finance Trade Mission</button>
+          </div>
+          <p class="section-subtitle">Escrow = estimated return cost minus estimated outbound sale revenue, never below zero.</p>
+        </div>
       </div>
-      <div class="form-row">
-        <button class="btn upgrade-ship-btn" data-ship-id="${ship.id}" data-upgrade-type="cargo" ${canUpgrade && gameState.credits >= cargoUpgradeCost ? "" : "disabled"} type="button">
-          Cargo Upgrade (Cost ${formatCredits(cargoUpgradeCost)}, ${formatSeconds(cargoUpgradeDuration)})
-        </button>
-        <button class="btn upgrade-ship-btn" data-ship-id="${ship.id}" data-upgrade-type="speed" ${canUpgrade && gameState.credits >= speedUpgradeCost ? "" : "disabled"} type="button">
-          Speed Upgrade (Cost ${formatCredits(speedUpgradeCost)}, ${formatSeconds(speedUpgradeDuration)})
-        </button>
-      </div>` : ""}
     </article>
   `;
-    })
-    .join("");
-
-  dom.hangarContent.innerHTML =
-    shipCards || '<div class="empty">No merchant ships available.</div>';
 }
 
-function renderNewsfeed() {
-  if (!dom.newsfeedContent) {
-    return;
-  }
-
-  const activeEvents = [...gameState.marketEvents]
-    .map((event) => ({ ...event, newsType: "temporary", sortTime: Date.now() + event.remainingSeconds * 1000 }))
-    .sort((a, b) => a.remainingSeconds - b.remainingSeconds);
-  const structuralItems = [...(gameState.structuralNews || [])]
-    .map((item) => ({ ...item, newsType: "structural", sortTime: Date.parse(item.timestamp) || 0 }));
-  const combinedItems = [...structuralItems.slice(0, 1), ...activeEvents]
-    .sort((a, b) => b.sortTime - a.sortTime)
-    .slice(0, 8);
-
-  if (combinedItems.length === 0) {
-    dom.newsfeedContent.innerHTML = '<div class="empty">No active market events right now.</div>';
-    return;
-  }
-
-  dom.newsfeedContent.innerHTML = combinedItems
-    .map((event) => {
-      const system = findSystem(gameState, event.systemId);
-      const commodity = COMMODITY_INDEX[event.commodityId];
-      const directionLabel = event.newsType === "structural"
-        ? event.kind === "global"
-          ? "Permanent Global Shift"
-          : "Permanent Market Shift"
-        : event.direction > 0
-          ? "Price Spike"
-          : "Price Dip";
-      return `
-      <article class="news-item">
-        <span class="news-kicker">${directionLabel} • ${escapeHtml(system ? system.name : event.kind === "global" ? "Galactic Market" : "Unknown System")}</span>
-        <strong>${escapeHtml(event.headline)}</strong>
-        <p class="section-subtitle">${commodity ? renderCommodityLabel(event.commodityId, system || getHomeSystem(gameState)) : ""} • ${escapeHtml(event.body)}</p>
-        <p class="section-subtitle">${event.newsType === "structural" ? "Permanent change" : `Expires in ${formatSeconds(event.remainingSeconds)}`}</p>
-      </article>
-    `;
-    })
-    .join("");
+function openTradePlanner(systemId) {
+  const firstShip = getIdleMerchantShips(gameState)[0];
+  tradePlannerState = {
+    systemId,
+    outboundCommodityId: COMMODITIES[0].id,
+    returnCommodityId: COMMODITIES[1].id,
+    selectedShipIds: firstShip ? [firstShip.id] : [],
+    selectedEnvoyId: null
+  };
+  renderTradePlanner();
+  dom.tradeModal.classList.remove("hidden");
+  dom.tradePlannerContent.scrollTop = 0;
+  syncBodyLock();
 }
 
-function renderEventLog() {
-  if (gameState.log.length === 0) {
-    dom.eventLog.innerHTML = '<li class="empty">No events yet.</li>';
-    return;
-  }
-
-  dom.eventLog.innerHTML = gameState.log
-    .map((entry) => {
-      const time = new Date(entry.timestamp);
-      return `
-      <li class="event-item">
-        ${escapeHtml(entry.text)}<br />
-        <time datetime="${entry.timestamp}">${time.toLocaleTimeString([], {
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit"
-        })}</time>
-      </li>
-    `;
-    })
-    .join("");
+function closeTradePlanner() {
+  tradePlannerState = null;
+  dom.tradeModal.classList.add("hidden");
+  syncBodyLock();
 }
 
-function renderEconomicHistory() {
-  if (!dom.economicHistoryContent) {
-    return;
-  }
-
-  const historyItems = [...(gameState.structuralNews || [])];
-  if (historyItems.length === 0) {
-    dom.economicHistoryContent.innerHTML = '<div class="empty">No permanent economic shifts recorded yet.</div>';
-    return;
-  }
-
-  dom.economicHistoryContent.innerHTML = historyItems
-    .map((item) => {
-      const system = item.systemId ? findSystem(gameState, item.systemId) : null;
-      const locationLabel = item.kind === "global" ? "Galactic Market" : system ? system.name : "Unknown System";
-      const timestamp = new Date(item.timestamp);
-      return `
-      <article class="news-item">
-        <span class="news-kicker">${item.kind === "global" ? "Global Base Shift" : "Permanent Market Shift"} • ${escapeHtml(locationLabel)}</span>
-        <strong>${escapeHtml(item.headline)}</strong>
-        <p class="section-subtitle">${renderCommodityLabel(item.commodityId, system || getHomeSystem(gameState))} • ${escapeHtml(item.body)}</p>
-        <p class="section-subtitle">${timestamp.toLocaleString([], {
-          month: "short",
-          day: "numeric",
-          hour: "2-digit",
-          minute: "2-digit"
-        })}</p>
-      </article>
-    `;
-    })
-    .join("");
-  dom.economicHistoryContent.innerHTML = `<div class="history-list">${dom.economicHistoryContent.innerHTML}</div>`;
+function renderAwaySummary(summary) {
+  dom.awaySummaryList.innerHTML = `
+    <li><strong>Time away:</strong> ${formatSeconds(summary.elapsedSeconds)}</li>
+    <li><strong>Trade missions completed:</strong> ${summary.completedTradeMissions}</li>
+    <li><strong>Credit change:</strong> <span class="${summary.creditsDelta >= 0 ? "pos" : "neg"}">${summary.creditsDelta >= 0 ? "+" : ""}${formatCredits(summary.creditsDelta)}</span></li>
+    <li><strong>Systems discovered:</strong> ${summary.discoveredDelta}</li>
+  `;
+  dom.awayModal.classList.remove("hidden");
+  syncBodyLock();
 }
 
 function renderAll() {
   renderHeader();
-  renderCorporateContracts();
-  renderTradeEnvoys();
-  renderHomeMarket();
-  renderSystems();
-  renderFleet();
-  renderShipyard();
-  renderHangar();
-  renderNewsfeed();
-  renderEventLog();
-  renderEconomicHistory();
+  renderHub();
+  renderHelp();
+  renderToasts();
+  if (activeSection && !(activeSection === "hangar" && activeInputLock)) {
+    renderSection();
+  }
   if (tradePlannerState) {
     renderTradePlanner();
-  }
-  if (dom.systemsModal && !dom.systemsModal.classList.contains("hidden")) {
-    renderSystemsModal();
   }
 }
 
@@ -3384,425 +2829,257 @@ function saveAndRender() {
   renderAll();
 }
 
-function onRootClick(event) {
+function maybeRerenderActiveSectionOnTick() {
+  renderHeader();
+  renderHub();
+  renderToasts();
+  if (activeSection && (activeSection !== "hangar" || !activeInputLock)) {
+    renderSection();
+  }
+}
+
+function resetGame() {
+  if (!window.confirm("Reset all progress and start a new trading post?")) {
+    return;
+  }
+  localStorage.removeItem(STORAGE_KEY);
+  gameState = createNewGameState();
+  activeSection = null;
+  tradePlannerState = null;
+  hangarExpandedShipId = null;
+  hangarDrafts = {};
+  saveAndRender();
+}
+
+document.body.addEventListener("click", (event) => {
   const rawTarget = event.target;
   if (!(rawTarget instanceof HTMLElement)) {
     return;
   }
 
-  const plannerOpenBtn = rawTarget.closest(".open-trade-planner-btn");
-  if (plannerOpenBtn instanceof HTMLElement) {
-    const systemId = plannerOpenBtn.dataset.systemId;
-    if (!systemId) {
-      return;
-    }
-    openTradePlanner(systemId);
+  const openSectionBtn = rawTarget.closest(".open-section-btn");
+  if (openSectionBtn instanceof HTMLElement) {
+    openSection(openSectionBtn.dataset.section);
     return;
   }
 
-  const openHelpBtn = rawTarget.closest("#openHelpBtn");
-  if (openHelpBtn instanceof HTMLElement) {
-    openHelpModal();
+  if (rawTarget.id === "closeSectionModalBtn") {
+    closeSection();
     return;
   }
-
-  const openSystemsModalBtn = rawTarget.closest("#openSystemsModalBtn");
-  if (openSystemsModalBtn instanceof HTMLElement) {
-    openSystemsModal();
-    return;
-  }
-
-  const systemsSortBtn = rawTarget.closest(".systems-sort-btn");
-  if (systemsSortBtn instanceof HTMLElement) {
-    const sortValue = systemsSortBtn.dataset.sortValue;
-    if (sortValue === "distance" || sortValue === "profit" || sortValue === "ratio") {
-      systemsModalSort = sortValue;
-      renderSystemsModal();
-    }
-    return;
-  }
-
-  const commodityBtn = rawTarget.closest(".commodity-btn");
-  if (commodityBtn instanceof HTMLElement) {
-    if (!tradePlannerState) {
-      return;
-    }
-    const role = commodityBtn.dataset.plannerRole;
-    const commodityId = commodityBtn.dataset.commodityId;
-    if (!COMMODITY_INDEX[commodityId]) {
-      return;
-    }
-    if (role === "return") {
-      tradePlannerState.returnCommodityId = commodityId;
-    } else {
-      tradePlannerState.outboundCommodityId = commodityId;
-    }
-    renderTradePlanner();
-    return;
-  }
-
-  const envoySelectBtn = rawTarget.closest(".envoy-select-btn");
-  if (envoySelectBtn instanceof HTMLElement) {
-    if (!tradePlannerState) {
-      return;
-    }
-    tradePlannerState.selectedEnvoyId = envoySelectBtn.dataset.envoyId || null;
-    renderTradePlanner();
-    return;
-  }
-
-  const shipSelectBtn = rawTarget.closest(".ship-select-btn");
-  if (shipSelectBtn instanceof HTMLElement) {
-    if (!tradePlannerState) {
-      return;
-    }
-    const shipId = shipSelectBtn.dataset.shipId;
-    if (!shipId) {
-      return;
-    }
-    const selectedIds = new Set(tradePlannerState.selectedShipIds || []);
-    if (selectedIds.has(shipId)) {
-      selectedIds.delete(shipId);
-    } else {
-      selectedIds.add(shipId);
-    }
-    tradePlannerState.selectedShipIds = Array.from(selectedIds);
-    renderTradePlanner();
-    return;
-  }
-
-  const selectAllTradeShipsBtn = rawTarget.closest("#selectAllTradeShipsBtn");
-  if (selectAllTradeShipsBtn instanceof HTMLElement) {
-    if (!tradePlannerState) {
-      return;
-    }
-    tradePlannerState.selectedShipIds = getIdleMerchantShips(gameState).map((ship) => ship.id);
-    renderTradePlanner();
-    return;
-  }
-
-  const toggleHangarDetailsBtn = rawTarget.closest(".toggle-hangar-details-btn");
-  if (toggleHangarDetailsBtn instanceof HTMLElement) {
-    const shipId = toggleHangarDetailsBtn.dataset.shipId;
-    if (!shipId) {
-      return;
-    }
-    if (expandedHangarShipIds.has(shipId)) {
-      expandedHangarShipIds.delete(shipId);
-    } else {
-      expandedHangarShipIds = new Set([shipId]);
-    }
-    renderHangar();
-    return;
-  }
-
-  const launchPlannedBtn = rawTarget.closest("#launchPlannedTradeBtn");
-  if (launchPlannedBtn instanceof HTMLElement) {
-    if (!tradePlannerState) {
-      return;
-    }
-    const systemId = tradePlannerState.systemId;
-    const result = launchTradeMission(
-      gameState,
-      systemId,
-      tradePlannerState.outboundCommodityId,
-      tradePlannerState.returnCommodityId,
-      tradePlannerState.selectedShipIds,
-      { allowPartialLoad: false, useFinancing: false, envoyId: tradePlannerState.selectedEnvoyId }
-    );
-    if (!result.ok) {
-      pushLog(gameState, `Trade launch failed: ${result.message}`);
-    } else {
-      closeTradePlanner();
-    }
-    saveAndRender();
-    return;
-  }
-
-  const launchPartialBtn = rawTarget.closest("#launchPartialTradeBtn");
-  if (launchPartialBtn instanceof HTMLElement) {
-    if (!tradePlannerState) {
-      return;
-    }
-    const systemId = tradePlannerState.systemId;
-    const result = launchTradeMission(
-      gameState,
-      systemId,
-      tradePlannerState.outboundCommodityId,
-      tradePlannerState.returnCommodityId,
-      tradePlannerState.selectedShipIds,
-      { allowPartialLoad: true, useFinancing: false, envoyId: tradePlannerState.selectedEnvoyId }
-    );
-    if (!result.ok) {
-      pushLog(gameState, `Trade launch failed: ${result.message}`);
-    } else {
-      closeTradePlanner();
-    }
-    saveAndRender();
-    return;
-  }
-
-  const launchFinancedBtn = rawTarget.closest("#launchFinancedTradeBtn");
-  if (launchFinancedBtn instanceof HTMLElement) {
-    if (!tradePlannerState) {
-      return;
-    }
-    const systemId = tradePlannerState.systemId;
-    const result = launchTradeMission(
-      gameState,
-      systemId,
-      tradePlannerState.outboundCommodityId,
-      tradePlannerState.returnCommodityId,
-      tradePlannerState.selectedShipIds,
-      { allowPartialLoad: false, useFinancing: true, envoyId: tradePlannerState.selectedEnvoyId }
-    );
-    if (!result.ok) {
-      pushLog(gameState, `Trade launch failed: ${result.message}`);
-    } else {
-      closeTradePlanner();
-    }
-    saveAndRender();
-    return;
-  }
-
-  const closeTradeBtn = rawTarget.closest("#closeTradeModalBtn");
-  if (closeTradeBtn instanceof HTMLElement) {
+  if (rawTarget.id === "closeTradeModalBtn") {
     closeTradePlanner();
     return;
   }
-
-  const recruitEnvoyBtn = rawTarget.closest(".recruit-envoy-btn");
-  if (recruitEnvoyBtn instanceof HTMLElement) {
-    const candidateId = recruitEnvoyBtn.dataset.envoyCandidateId;
-    if (!candidateId) {
-      return;
-    }
-    const result = recruitTradeEnvoy(gameState, candidateId);
-    if (!result.ok) {
-      pushLog(gameState, `Recruitment failed: ${result.message}`);
-    }
-    saveAndRender();
+  if (rawTarget.id === "openHelpBtn") {
+    dom.helpModal.classList.remove("hidden");
+    syncBodyLock();
+    return;
+  }
+  if (rawTarget.id === "closeHelpModalBtn") {
+    dom.helpModal.classList.add("hidden");
+    syncBodyLock();
+    return;
+  }
+  if (rawTarget.id === "closeAwayModalBtn") {
+    dom.awayModal.classList.add("hidden");
+    syncBodyLock();
     return;
   }
 
-  const closeSystemsBtn = rawTarget.closest("#closeSystemsModalBtn");
-  if (closeSystemsBtn instanceof HTMLElement) {
-    closeSystemsModal();
+  const planTradeBtn = rawTarget.closest(".plan-trade-btn");
+  if (planTradeBtn instanceof HTMLElement) {
+    openTradePlanner(planTradeBtn.dataset.systemId);
     return;
   }
 
-  const closeHelpBtn = rawTarget.closest("#closeHelpModalBtn");
-  if (closeHelpBtn instanceof HTMLElement) {
-    closeHelpModal();
+  const sortBtn = rawTarget.closest(".sort-systems-btn");
+  if (sortBtn instanceof HTMLElement) {
+    navigationSort = sortBtn.dataset.sort || "distance";
+    if (activeSection === "navigation") {
+      renderSection();
+    }
     return;
   }
 
-  const legacyLaunchBtn = rawTarget.closest(".launch-trade-btn");
-  if (legacyLaunchBtn instanceof HTMLElement) {
-    // Legacy button fallback (unused in current UI).
-    const systemId = legacyLaunchBtn.dataset.systemId;
-    if (!systemId) {
-      return;
-    }
-
-    const result = launchTradeMission(
-      gameState,
-      systemId,
-      COMMODITIES[0].id,
-      COMMODITIES[1]?.id || COMMODITIES[0].id,
-      [getIdleMerchantShips(gameState)[0]?.id].filter(Boolean),
-      { allowPartialLoad: false, useFinancing: false }
-    );
-    if (!result.ok) {
-      pushLog(gameState, `Trade launch failed: ${result.message}`);
-    }
-    saveAndRender();
-    return;
-  }
-
-  const buyMerchantBtn = rawTarget.closest("#buyMerchantBtn");
-  if (buyMerchantBtn instanceof HTMLElement) {
-    const result = buyMerchantShip(gameState);
-    if (!result.ok) {
-      pushLog(gameState, `Purchase failed: ${result.message}`);
-    }
-    saveAndRender();
-    return;
-  }
-
-  const saveShipCustomBtn = rawTarget.closest(".save-ship-custom-btn");
-  if (saveShipCustomBtn instanceof HTMLElement) {
-    const shipId = saveShipCustomBtn.dataset.shipId;
-    if (!shipId) {
-      return;
-    }
-    const nameInput = document.getElementById(`ship-name-${shipId}`);
-    const colorSelect = document.getElementById(`ship-color-${shipId}`);
-    const nameValue = nameInput instanceof HTMLInputElement ? nameInput.value : "";
-    const colorValue = colorSelect instanceof HTMLInputElement ? colorSelect.value : SHIP_NAME_COLORS[0];
-    const result = updateMerchantShipStyle(gameState, shipId, nameValue, colorValue);
-    if (!result.ok) {
-      pushLog(gameState, `Ship update failed: ${result.message}`);
-    }
-    saveAndRender();
-    return;
-  }
-
-  const colorSwatchBtn = rawTarget.closest(".color-swatch-btn");
-  if (colorSwatchBtn instanceof HTMLElement) {
-    const shipId = colorSwatchBtn.dataset.shipId;
-    const colorValue = colorSwatchBtn.dataset.colorValue;
-    if (!shipId || !colorValue) {
-      return;
-    }
-    const hiddenInput = document.getElementById(`ship-color-${shipId}`);
-    if (hiddenInput instanceof HTMLInputElement) {
-      hiddenInput.value = colorValue;
-    }
-    const siblings = document.querySelectorAll(`.color-swatch-btn[data-ship-id="${shipId}"]`);
-    siblings.forEach((button) => button.classList.remove("active"));
-    colorSwatchBtn.classList.add("active");
-    return;
-  }
-
-  const upgradeShipBtn = rawTarget.closest(".upgrade-ship-btn");
-  if (upgradeShipBtn instanceof HTMLElement) {
-    const shipId = upgradeShipBtn.dataset.shipId;
-    const upgradeType = upgradeShipBtn.dataset.upgradeType;
-    if (!shipId || !upgradeType) {
-      return;
-    }
-    const result = startShipUpgrade(gameState, shipId, upgradeType);
-    if (!result.ok) {
-      pushLog(gameState, `Upgrade failed: ${result.message}`);
-    }
-    saveAndRender();
-    return;
-  }
-
-  const buyScoutBtn = rawTarget.closest("#buyScoutBtn");
-  if (buyScoutBtn instanceof HTMLElement) {
-    const result = buyScoutShip(gameState);
-    if (!result.ok) {
-      pushLog(gameState, `Purchase failed: ${result.message}`);
-    }
-    saveAndRender();
-    return;
-  }
-
-  const launchScoutBtn = rawTarget.closest("#launchScoutBtn");
+  const launchScoutBtn = rawTarget.closest('[data-action="launch-scout"]');
   if (launchScoutBtn instanceof HTMLElement) {
     const result = launchScoutMission(gameState);
     if (!result.ok) {
-      pushLog(gameState, `Scout launch failed: ${result.message}`);
+      addToast(gameState, "Scout Mission Blocked", result.message);
     }
     saveAndRender();
-  }
-}
-
-function resetGame() {
-  const confirmed = window.confirm("Reset all progress and start a new trading post?");
-  if (!confirmed) {
     return;
   }
 
-  localStorage.removeItem(STORAGE_KEY);
-  gameState = createNewGameState();
-  expandedHangarShipIds = new Set();
-  closeTradePlanner();
-  saveAndRender();
-}
-
-function closeAwaySummary() {
-  if (!dom.awayModal) {
-    return;
-  }
-  dom.awayModal.classList.add("hidden");
-  if (
-    dom.tradeModal?.classList.contains("hidden") &&
-    dom.systemsModal?.classList.contains("hidden") &&
-    dom.helpModal?.classList.contains("hidden")
-  ) {
-    document.body.classList.remove("modal-open");
-  }
-}
-
-function registerServiceWorker() {
-  if (!("serviceWorker" in navigator)) {
-    return;
-  }
-  if (window.location.protocol === "file:") {
+  const buyShipBtn = rawTarget.closest('[data-action="buy-merchant-ship"]');
+  if (buyShipBtn instanceof HTMLElement) {
+    const result = buyMerchantShip(gameState);
+    if (!result.ok) addToast(gameState, "Purchase Blocked", result.message);
+    saveAndRender();
     return;
   }
 
-  let refreshing = false;
+  const buyScoutBtn = rawTarget.closest('[data-action="buy-scout-ship"]');
+  if (buyScoutBtn instanceof HTMLElement) {
+    const result = buyScoutShip(gameState);
+    if (!result.ok) addToast(gameState, "Purchase Blocked", result.message);
+    saveAndRender();
+    return;
+  }
 
-  navigator.serviceWorker.addEventListener("controllerchange", () => {
-    if (refreshing) {
+  const resetBtn = rawTarget.closest('[data-action="reset-game"]');
+  if (resetBtn instanceof HTMLElement) {
+    resetGame();
+    return;
+  }
+
+  const toggleHangarBtn = rawTarget.closest(".toggle-hangar-btn");
+  if (toggleHangarBtn instanceof HTMLElement) {
+    const shipId = toggleHangarBtn.dataset.shipId;
+    hangarExpandedShipId = hangarExpandedShipId === shipId ? null : shipId;
+    renderSection();
+    return;
+  }
+
+  const shipColorBtn = rawTarget.closest(".choose-ship-color-btn");
+  if (shipColorBtn instanceof HTMLElement) {
+    const shipId = shipColorBtn.dataset.shipId;
+    hangarDrafts[shipId] = { ...(hangarDrafts[shipId] || { name: findMerchantShip(gameState, shipId)?.name || "", color: findMerchantShip(gameState, shipId)?.nameColor || SHIP_NAME_COLORS[0] }), color: shipColorBtn.dataset.color };
+    renderSection();
+    return;
+  }
+
+  const saveShipStyleBtn = rawTarget.closest(".save-ship-style-btn");
+  if (saveShipStyleBtn instanceof HTMLElement) {
+    const shipId = saveShipStyleBtn.dataset.shipId;
+    const draft = hangarDrafts[shipId] || { name: findMerchantShip(gameState, shipId)?.name || "", color: findMerchantShip(gameState, shipId)?.nameColor || SHIP_NAME_COLORS[0] };
+    const result = updateMerchantShipStyle(gameState, shipId, draft.name, draft.color);
+    if (!result.ok) addToast(gameState, "Customization Blocked", result.message);
+    saveAndRender();
+    return;
+  }
+
+  const upgradeBtn = rawTarget.closest(".start-upgrade-btn");
+  if (upgradeBtn instanceof HTMLElement) {
+    const result = startShipUpgrade(gameState, upgradeBtn.dataset.shipId, upgradeBtn.dataset.upgradeType);
+    if (!result.ok) addToast(gameState, "Upgrade Blocked", result.message);
+    saveAndRender();
+    return;
+  }
+
+  if (tradePlannerState) {
+    const outboundBtn = rawTarget.closest(".choose-outbound-btn");
+    if (outboundBtn instanceof HTMLElement) {
+      tradePlannerState.outboundCommodityId = outboundBtn.dataset.commodityId;
+      renderTradePlanner();
       return;
     }
-    refreshing = true;
-    window.location.reload();
-  });
-
-  window.addEventListener("load", () => {
-    navigator.serviceWorker
-      .register("./sw.js", { updateViaCache: "none" })
-      .then((registration) => registration.update())
-      .catch((error) => {
-        console.warn("Service worker registration failed", error);
+    const returnBtn = rawTarget.closest(".choose-return-btn");
+    if (returnBtn instanceof HTMLElement) {
+      tradePlannerState.returnCommodityId = returnBtn.dataset.commodityId;
+      renderTradePlanner();
+      return;
+    }
+    const shipBtn = rawTarget.closest(".toggle-ship-btn");
+    if (shipBtn instanceof HTMLElement) {
+      const shipId = shipBtn.dataset.shipId;
+      const set = new Set(tradePlannerState.selectedShipIds);
+      if (set.has(shipId)) set.delete(shipId); else set.add(shipId);
+      tradePlannerState.selectedShipIds = [...set];
+      renderTradePlanner();
+      return;
+    }
+    const selectAllBtn = rawTarget.closest(".select-all-ships-btn");
+    if (selectAllBtn instanceof HTMLElement) {
+      tradePlannerState.selectedShipIds = getIdleMerchantShips(gameState).map((ship) => ship.id);
+      renderTradePlanner();
+      return;
+    }
+    const envoyBtn = rawTarget.closest(".choose-envoy-btn");
+    if (envoyBtn instanceof HTMLElement) {
+      tradePlannerState.selectedEnvoyId = envoyBtn.dataset.envoyId || null;
+      renderTradePlanner();
+      return;
+    }
+    const launchBtn = rawTarget.closest(".launch-mission-btn");
+    if (launchBtn instanceof HTMLElement) {
+      const result = launchTradeMissionBatch(gameState, {
+        systemId: tradePlannerState.systemId,
+        outboundCommodityId: tradePlannerState.outboundCommodityId,
+        returnCommodityId: tradePlannerState.returnCommodityId,
+        shipIds: tradePlannerState.selectedShipIds,
+        envoyId: tradePlannerState.selectedEnvoyId,
+        mode: launchBtn.dataset.mode
       });
-  });
-}
+      if (!result.ok) {
+        addToast(gameState, "Mission Blocked", result.message);
+      } else {
+        closeTradePlanner();
+      }
+      saveAndRender();
+      return;
+    }
+  }
+});
 
-document.body.addEventListener("click", onRootClick);
-dom.resetBtn.addEventListener("click", resetGame);
-if (dom.closeAwayModalBtn) {
-  dom.closeAwayModalBtn.addEventListener("click", closeAwaySummary);
-}
-if (dom.closeHelpModalBtn) {
-  dom.closeHelpModalBtn.addEventListener("click", closeHelpModal);
-}
-
-registerServiceWorker();
-
-let lastTickMs = Date.now();
-
-setInterval(() => {
-  const nowMs = Date.now();
-  const elapsedSeconds = Math.max(0, Math.floor((nowMs - lastTickMs) / 1000));
-  if (elapsedSeconds <= 0) {
+document.body.addEventListener("input", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) {
     return;
   }
-  lastTickMs += elapsedSeconds * 1000;
-
-  const tickResult = advanceGameBySeconds(gameState, elapsedSeconds);
-
-  if (tickResult.timersAdvanced || tickResult.majorStateChange || tickResult.marketChanged) {
-    saveGameState(gameState);
+  if (target.classList.contains("hangar-name-input")) {
+    const input = target;
+    const shipId = input.dataset.shipId;
+    const ship = findMerchantShip(gameState, shipId);
+    hangarDrafts[shipId] = {
+      ...(hangarDrafts[shipId] || { color: ship?.nameColor || SHIP_NAME_COLORS[0] }),
+      name: input.value,
+      color: (hangarDrafts[shipId] && hangarDrafts[shipId].color) || ship?.nameColor || SHIP_NAME_COLORS[0]
+    };
   }
+});
 
-  if (tickResult.majorStateChange) {
+document.body.addEventListener("focusin", (event) => {
+  const target = event.target;
+  if (target instanceof HTMLElement && target.classList.contains("hangar-name-input")) {
+    activeInputLock = true;
+  }
+});
+
+document.body.addEventListener("focusout", (event) => {
+  const target = event.target;
+  if (target instanceof HTMLElement && target.classList.contains("hangar-name-input")) {
+    activeInputLock = false;
+  }
+});
+
+setInterval(() => {
+  const now = Date.now();
+  const elapsed = Math.max(1, Math.floor((now - lastTickMs) / 1000));
+  lastTickMs = now;
+  const result = advanceGameBySeconds(gameState, elapsed);
+  saveGameState(gameState);
+  if (result.majorStateChange) {
     renderAll();
   } else {
-    if (tickResult.timersAdvanced || tickResult.marketChanged) {
-      renderHeader();
-    }
-    if (tickResult.timersAdvanced) {
-      renderCorporateContracts();
-      renderFleet();
-      renderNewsfeed();
-    }
-    if (tickResult.marketChanged) {
-      renderHomeMarket();
-      renderSystems();
-      renderNewsfeed();
-    }
+    maybeRerenderActiveSectionOnTick();
   }
 }, TICK_INTERVAL_MS);
 
-saveAndRender();
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", async () => {
+    try {
+      const registration = await navigator.serviceWorker.register("sw.js", { updateViaCache: "none" });
+      registration.update();
+    } catch (error) {
+      console.warn("Service worker registration failed", error);
+    }
+  });
+}
 
-if (offlineCatchUp.elapsedSeconds > 0) {
-  showAwaySummary(offlineCatchUp);
+renderAll();
+saveGameState(gameState);
+if (offlineSummary) {
+  renderAwaySummary(offlineSummary);
 }

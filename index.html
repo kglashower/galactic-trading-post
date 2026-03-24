@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Galactic Trading Post</title>
-    <meta name="theme-color" content="#0b1430" />
+    <meta name="theme-color" content="#081226" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Galactic Trading Post" />
@@ -15,172 +15,81 @@
   </head>
   <body>
     <div class="bg-grid" aria-hidden="true"></div>
+    <div id="toastStack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
     <button id="openHelpBtn" class="help-fab" type="button" aria-haspopup="dialog" aria-controls="helpModal">Help</button>
+
     <main class="app">
-      <header class="panel header-panel">
-        <div>
-          <p class="eyebrow">Idle Management Game</p>
-          <h1>Galactic Trading Post</h1>
+      <section class="hub panel">
+        <div class="hub-head">
+          <div>
+            <p class="eyebrow">Spaceport Management Sim</p>
+            <h1>Galactic Trading Post</h1>
+            <p class="section-subtitle">Run Sol Nexus like the busiest port in the sector.</p>
+          </div>
         </div>
-        <div class="header-stats" id="headerStats"></div>
-      </header>
-
-      <section class="panel" aria-labelledby="newsTitle">
-        <div class="section-head">
-          <h2 id="newsTitle">Newsfeed</h2>
-          <p class="section-subtitle">Live market events across discovered systems.</p>
-        </div>
-        <div id="newsfeedContent" class="stack"></div>
+        <div id="headerStats" class="header-stats"></div>
       </section>
 
-      <section class="panel" aria-labelledby="contractsTitle">
+      <section class="panel" aria-labelledby="spaceportTitle">
         <div class="section-head">
-          <h2 id="contractsTitle">Corporate Contracts</h2>
-          <p class="section-subtitle">High-value bulk delivery mandates with strict deadlines.</p>
+          <div>
+            <h2 id="spaceportTitle">Spaceport Hub</h2>
+            <p class="section-subtitle">Open a location to manage one part of your trading empire.</p>
+          </div>
         </div>
-        <div id="contractsContent" class="cards-grid"></div>
-      </section>
-
-      <section class="panel" aria-labelledby="envoysTitle">
-        <div class="section-head">
-          <h2 id="envoysTitle">Trade Envoys</h2>
-          <p class="section-subtitle">Specialist negotiators recruited with reputation from completed contracts.</p>
-        </div>
-        <div id="envoysContent" class="cards-grid"></div>
-      </section>
-
-      <section class="panel" aria-labelledby="marketTitle">
-        <div class="section-head">
-          <h2 id="marketTitle">Home System Market</h2>
-          <p class="section-subtitle" id="homeSystemName"></p>
-        </div>
-        <div id="homeMarket" class="market-table-wrap"></div>
-      </section>
-
-      <section class="panel" aria-labelledby="systemsTitle">
-        <div class="section-head">
-          <h2 id="systemsTitle">Discovered Systems</h2>
-          <p class="section-subtitle">Launch round-trip trade missions from home.</p>
-        </div>
-        <div id="systemsList" class="cards-grid"></div>
-      </section>
-
-      <section class="panel" aria-labelledby="fleetTitle">
-        <div class="section-head">
-          <h2 id="fleetTitle">Fleet / Missions</h2>
-          <p class="section-subtitle">Mission timers tick in real time.</p>
-        </div>
-        <div id="fleetContent" class="fleet-grid"></div>
-      </section>
-
-      <section class="panel" aria-labelledby="shipyardTitle">
-        <div class="section-head">
-          <h2 id="shipyardTitle">Shipyard / Upgrades</h2>
-          <p class="section-subtitle">Expand your operation.</p>
-        </div>
-        <div id="shipyardContent" class="shipyard-actions"></div>
-      </section>
-
-      <section class="panel" aria-labelledby="hangarTitle">
-        <div class="section-head">
-          <h2 id="hangarTitle">Hangar</h2>
-          <p class="section-subtitle">Customize and upgrade individual merchant ships.</p>
-        </div>
-        <div id="hangarContent" class="shipyard-actions"></div>
-      </section>
-
-      <section class="panel" aria-labelledby="logTitle">
-        <div class="section-head">
-          <h2 id="logTitle">Event Log</h2>
-          <button id="resetBtn" class="btn danger" type="button">Reset Game</button>
-        </div>
-        <ul id="eventLog" class="event-log"></ul>
-      </section>
-
-      <section class="panel" aria-labelledby="historyTitle">
-        <div class="section-head">
-          <h2 id="historyTitle">Economic History</h2>
-          <p class="section-subtitle">Permanent structural changes across the trading network.</p>
-        </div>
-        <div id="economicHistoryContent" class="stack"></div>
+        <div id="hubLocations" class="hub-grid"></div>
       </section>
     </main>
 
-    <div id="awayModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="awayTitle">
-      <div class="modal-card">
-        <h2 id="awayTitle">Away Summary</h2>
-        <p class="section-subtitle">Your trading post kept running while you were away.</p>
-        <ul id="awaySummaryList" class="summary-list"></ul>
-        <button id="closeAwayModalBtn" class="btn" type="button">Continue</button>
+    <div id="sectionModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="sectionModalTitle">
+      <div class="modal-card section-modal-card">
+        <div class="section-head sticky-head">
+          <div>
+            <p id="sectionModalKicker" class="eyebrow">Spaceport</p>
+            <h2 id="sectionModalTitle">Location</h2>
+          </div>
+          <button id="closeSectionModalBtn" class="btn secondary" type="button">Close</button>
+        </div>
+        <div id="sectionModalBody" class="section-modal-body"></div>
       </div>
     </div>
 
     <div id="tradeModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="tradeTitle">
       <div class="modal-card trade-modal-card">
-        <div class="section-head">
-          <h2 id="tradeTitle">Trade Mission</h2>
+        <div class="section-head sticky-head">
+          <div>
+            <p class="eyebrow">Dispatch Office</p>
+            <h2 id="tradeTitle">Trade Mission</h2>
+          </div>
           <button id="closeTradeModalBtn" class="btn secondary" type="button">Close</button>
         </div>
-        <div id="tradePlannerContent"></div>
+        <div id="tradePlannerContent" class="section-modal-body"></div>
       </div>
     </div>
 
-    <div id="systemsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="systemsModalTitle">
-      <div class="modal-card trade-modal-card">
+    <div id="awayModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="awayTitle">
+      <div class="modal-card compact-modal-card">
         <div class="section-head">
           <div>
-            <h2 id="systemsModalTitle">All Discovered Systems</h2>
-            <p class="section-subtitle">Compare routes by distance, total profit, or profit efficiency.</p>
+            <p class="eyebrow">Station Report</p>
+            <h2 id="awayTitle">Away Summary</h2>
           </div>
-          <button id="closeSystemsModalBtn" class="btn secondary" type="button">Close</button>
         </div>
-        <div id="systemsModalContent"></div>
+        <ul id="awaySummaryList" class="summary-list"></ul>
+        <button id="closeAwayModalBtn" class="btn" type="button">Continue</button>
       </div>
     </div>
 
     <div id="helpModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
       <div class="modal-card trade-modal-card">
-        <div class="section-head">
+        <div class="section-head sticky-head">
           <div>
+            <p class="eyebrow">Operations Briefing</p>
             <h2 id="helpTitle">How To Play</h2>
-            <p class="section-subtitle">A quick guide to trading, scouting, and growing your post.</p>
           </div>
           <button id="closeHelpModalBtn" class="btn secondary" type="button">Close</button>
         </div>
-        <div class="stack">
-          <article class="news-item">
-            <strong>Core Loop</strong>
-            <p class="section-subtitle">Buy cargo at Sol Nexus, send merchant ships to discovered systems, sell outbound cargo there, buy return cargo, then sell it back home for profit.</p>
-          </article>
-          <article class="news-item">
-            <strong>Finding Good Routes</strong>
-            <p class="section-subtitle">Use the Discovered Systems panel for the two best route suggestions, or open the full systems browser to sort by distance, profit, or profit efficiency.</p>
-          </article>
-          <article class="news-item">
-            <strong>Fleet Management</strong>
-            <p class="section-subtitle">Merchant ships can be named, recolored, and upgraded in the Hangar. Cargo upgrades raise carrying capacity. Speed upgrades shorten travel time.</p>
-          </article>
-          <article class="news-item">
-            <strong>Scouting</strong>
-            <p class="section-subtitle">Buy a scout ship in the Shipyard to reveal more systems over time. More discovered systems means more profitable route options.</p>
-          </article>
-          <article class="news-item">
-            <strong>Corporate Contracts</strong>
-            <p class="section-subtitle">Three premium bulk-delivery contracts are always available. Deliver the requested commodity to the target system before the timer expires to collect a large bounty and reputation.</p>
-          </article>
-          <article class="news-item">
-            <strong>Trade Envoys</strong>
-            <p class="section-subtitle">Use reputation from completed contracts to recruit Trade Envoys. Each envoy specializes in one commodity, improves mission pricing for it, and gains XP from missions that carry their specialty.</p>
-          </article>
-          <article class="news-item">
-            <strong>Markets And Events</strong>
-            <p class="section-subtitle">Temporary news events shift local prices for a while. Structural events can permanently change a system’s market class or the galaxy-wide base price of a commodity.</p>
-          </article>
-          <article class="news-item">
-            <strong>Funding Missions</strong>
-            <p class="section-subtitle">If you lack credits for a full route, you can launch a partial load or finance the trip. Financing borrows the shortfall and adds time-based interest.</p>
-          </article>
-        </div>
+        <div id="helpContent" class="section-modal-body stack"></div>
       </div>
     </div>
 

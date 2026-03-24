@@ -2,163 +2,126 @@
 
 Galactic Trading Post is a mobile-first browser trading and management game built with plain HTML, CSS, and JavaScript.
 
-You run a trading post in the home system `Sol Nexus`, send merchant ships on round-trip trade runs, scout distant systems, customize and upgrade your fleet, react to market events, fulfill premium `Corporate Contracts`, and recruit `Trade Envoys` who improve pricing on their specialty commodities. The game saves locally in `localStorage` and supports offline-capable PWA behavior when served from a real web origin.
+You operate a trading post in `Sol Nexus`, dispatch merchant ships on round-trip missions, scout new systems, fulfill premium `Corporate Contracts`, level up your station through reputation, and unlock `Trade Envoys` who improve mission pricing on their specialty commodities. The game saves in `localStorage` and supports offline-capable PWA behavior when served from a real web origin.
 
-## Current Gameplay
+## Current Game Loops
 
-- Buy outbound cargo at the home system and sell it at a remote destination
-- Buy return cargo at the destination and sell it back home
-- Use multiple merchant ships at once
-- Customize each merchant ship with:
-  - a custom name
-  - a custom name color
-  - cargo upgrades
-  - speed upgrades
-- Scout new systems over time
-- Monitor temporary and permanent market events
-- Complete high-value `Corporate Contracts`
-- Recruit and level `Trade Envoys`
-- Continue progressing while away from the game
+### Trading
 
-## Core Systems
+- Launch round-trip trade missions from `Sol Nexus`
+- Pick:
+  - a destination system
+  - outbound cargo
+  - return cargo
+  - the exact merchant ships to send
+  - optionally one idle Trade Envoy
+- Missions use escrow for return cargo planning
+- If you cannot fully fund a route, you can:
+  - launch a partial load
+  - finance the mission and pay additive time-based interest
+- Ships with different speed upgrades can still launch together, but their timing remains ship-specific
 
-### Economy
+### Corporate Contracts
 
-- Currency: `Credits`
-- Commodities:
-  - Food
-  - Water
-  - Ore
-  - Fuel
-  - Electronics
-  - Medicine
-- Every commodity has a base price
-- Each system has local pricing shaped by:
-  - its market profile
-  - temporary supply/demand pressure from buying and selling
-  - temporary news events
-  - permanent structural shifts
+- Three `Corporate Contracts` are always active
+- Each contract targets:
+  - one commodity
+  - one discovered system
+  - one quantity goal
+  - one delivery deadline
+- Contracts award:
+  - a large Credit bounty
+  - `1`, `2`, or `3` reputation XP based on difficulty
+- Progress increases when outbound cargo reaches the matching destination
+- Completed contracts generate:
+  - a toast notification
+  - an Event Log entry
+  - replacement contracts to keep the board full
 
-### System Types
+### Reputation And Levels
 
-System types are generated from all valid combinations of:
+Reputation is now progression XP, not currency.
 
-- 2 high-priced commodities chosen from 6
-- 2 low-priced commodities chosen from the remaining 4
+- Player level thresholds use cumulative growth:
+  - Level 1: `0`
+  - Level 2: `3`
+  - Level 3: `7`
+  - Level 4: `12`
+  - Level 5: `18`
+  - Level 6: `25`
+  - and so on with increasing increments
+- Level rewards are automatic:
+  - non-third levels: `+1 max merchant ship`
+  - every third level: `+1 Trade Envoy`
 
-This creates all unique valid market profiles with no overlap between high and low commodities.
+### Trade Envoys
 
-### Star Systems
+Trade Envoys are granted automatically, not recruited manually.
 
-- New games generate `100` discoverable remote systems
-- Distances are expressed in `LY`
-- Distances are deterministic but irregularly distributed
-- Only discovered systems are visible to the player
-- Scouting reveals additional systems over time
+- Envoys unlock every third level
+- Grant order is deterministic:
+  - all single-commodity envoys first, lowest base-price commodity to highest
+  - then two-commodity envoys, lowest combined base price to highest
+- Every envoy has:
+  - a unique first name
+  - a unique last name
+  - one or two specialty commodities
+  - XP and level
+- Envoys become unavailable while assigned to a trade mission batch
+- Envoy bonus strength scales with envoy level
 
 ### Merchant Ships
 
 Each merchant ship is unique.
 
-- Can be renamed
-- Can be recolored
-- Can be upgraded repeatedly
-- Cargo upgrades increase carrying capacity
-- Speed upgrades reduce mission duration
-- Upgrade cost scales by ship and level
-- Upgrade time scales by level
-- Upgrading ships are unavailable for missions
+- Custom name
+- Custom name color
+- Cargo upgrades
+- Speed upgrades
+- Upgrades take time and block the ship from missions while in refit
+- Merchant ship purchases are capped by player level progression
 
-### Trade Missions
+### Scouting
 
-Trade missions are round-trip.
-
-- Choose a destination
-- Choose outbound cargo
-- Choose return cargo
-- Choose exactly which idle ships to send
-- Optionally select all idle ships at once
-- Multi-ship launches are supported
-- Ships with different speeds are tracked separately in the fleet view
-
-Mission flow:
-
-1. Buy outbound cargo at home
-2. Hold return-cost escrow
-3. Arrive at destination
-4. Sell outbound cargo
-5. Release escrow
-6. Buy return cargo
-7. Return home
-8. Sell return cargo
-
-If the player lacks enough Credits for a full mission:
-
-- they can launch a `Partial Load`, or
-- they can `Finance` the mission
-
-### Financing
-
-- The player borrows the difference between current Credits and total mission cost
-- Financing charges additive interest based on mission time
-- Current balance:
-  - `1% per minute`
-  - minimum billed duration of `5 minutes`
-- Fleet cards and mission logs show financed outcomes
-
-### Corporate Contracts
-
-`Corporate Contracts` are premium delivery quests.
-
-- Three contracts are active at all times
-- Each contract requires:
-  - a specific commodity
-  - a target system
-  - a total quantity delivered
-  - delivery before a deadline
-- Progress increases when outbound cargo arrives at the matching destination
-- Bounties scale with:
+- Buy one scout ship in the Shipyard
+- Scouting missions reveal undiscovered systems over time
+- Scout mission duration starts at `20 minutes` and increases for each launch
+- Scout completion notifications include:
+  - system name
   - distance
-  - quantity
-- Rewards are intentionally much more lucrative than normal trade margins
+  - high-price commodities
+  - low-price commodities
 
-### Trade Envoys
+## Economy And Markets
 
-`Trade Envoys` are specialist negotiators unlocked through reputation.
+### Commodities
 
-- Completing `Corporate Contracts` awards reputation
-- Reputation is spent to recruit envoys
-- Recruitment offers three generated candidates at a time
-- Recruitment cost scales exponentially as more envoys are hired
-- Each envoy specializes in one commodity
-- An envoy can be assigned to a trade mission during planning
-- If their specialty commodity is used on the mission:
-  - buy prices improve
-  - sell prices improve
-- Envoys earn XP based on:
-  - the square root of the total amount of their specialty commodity carried on the mission
-- Higher envoy levels give stronger pricing bonuses
+- Food
+- Water
+- Ore
+- Fuel
+- Electronics
+- Medicine
 
-### Events
+### System Types
 
-The game has two layers of market events.
+Every remote system is generated from a unique market profile:
 
-Temporary market events:
+- choose `2` high-priced commodities from the `6`
+- choose `2` low-priced commodities from the remaining `4`
+- highs and lows never overlap
 
-- Two active at a time
-- Offset by 10 minutes
-- Each lasts 20 minutes
-- Shift one commodity in one discovered system by one tier
+### Pricing Model
 
-Permanent structural events:
+Prices are shaped by:
 
-- Occur every 20 to 30 hours
-- `90%` chance:
-  - permanently shift one commodity in one discovered system by one tier
-- `10%` chance:
-  - permanently change the global base price of one commodity
+- system market tier profile
+- global commodity base prices
+- local supply and demand pressure from player trading
+- temporary news events
+- permanent structural shifts
 
-Market tiers:
+Market tiers are:
 
 - Very Low
 - Low
@@ -166,79 +129,87 @@ Market tiers:
 - High
 - Very High
 
-### Offline Progression
+### Events
 
-The simulation continues while the player is away.
+Temporary market events:
 
-- Trade missions continue
-- Scout missions continue
-- Ship upgrades continue
-- Contract deadlines continue
-- Market pressure decays
-- Temporary and permanent events continue
+- two active at a time
+- offset by `10 minutes`
+- each lasts `20 minutes`
+- move one commodity in one discovered system up or down one tier
 
-An `Away Summary` modal reports the key results when the player returns.
+Permanent structural events:
 
-## UI Overview
+- occur every `8 to 12 hours`
+- `90%` chance:
+  - permanently shift one commodity in one discovered system by one tier
+- `10%` chance:
+  - permanently change the global base price of one commodity
 
-- Header
-  - Credits
-  - available merchant ships
-  - scout status
-  - escrow
-  - reputation
-- Newsfeed
-  - active temporary market events
-  - most recent permanent market shift
-- Corporate Contracts
-  - active contract cards with progress
-- Trade Envoys
-  - recruitment candidates
-  - current envoy roster
-  - envoy specialty, level, and pricing bonus
-- Home System Market
-  - current home prices for all commodities
-- Discovered Systems
-  - two featured routes on the main screen:
-    - best round-trip profit
-    - best profit-to-distance ratio
-  - button to open all discovered systems in a sortable dialog
-- Fleet / Missions
-  - active trade missions
-  - active upgrades
-  - scout status
+## Spaceport UI
+
+The app now uses a hub-and-location layout.
+
+### Home Screen
+
+The home screen is intentionally minimal:
+
+- Credits
+- Escrow
+- Level and reputation progress
+- merchant ship usage and cap
+- scout status
+- discovered system count
+
+From there, the player opens full-screen `spaceport locations`:
+
+- Trade Exchange
+- Navigation Office
+- Merchant Fleet
 - Shipyard
-  - buy merchant ships
-  - buy the scout ship
 - Hangar
-  - customize and upgrade ships
-- Event Log
-  - recent actions and outcomes
-- Economic History
-  - scrollable archive of permanent structural shifts
-- Help
-  - floating button with an in-game overview dialog
+- Corporate Contracts
+- Trade Envoys
+- Trade Analytics
+- Newsfeed & History
 
-## Project Files
+Each location resets its scroll position to the top when reopened.
+
+### Trade Analytics
+
+The `Trade Analytics` section tracks completed mission batches and shows:
+
+- lifetime revenue
+- lifetime profit
+- financed mission count
+- contract-serving mission count
+- total cargo moved
+- systems discovered
+- recent profit trend chart
+- commodity mix chart
+- top profit routes
+- best profit-per-distance routes
+
+## Files
 
 - `index.html`
-  - app structure, panels, and modal markup
+  - app shell, modal locations, help, and away summary structure
 - `styles.css`
-  - mobile-first layout, sci-fi styling, cards, modal styles, and responsive behavior
+  - mobile-first styling, spaceport hub layout, cards, charts, and modal presentation
 - `script.js`
-  - game state, generation logic, timers, persistence, rendering, contracts, events, and interactions
+  - game state, generation logic, progression, missions, contracts, envoys, events, analytics, persistence, and rendering
 - `manifest.webmanifest`
-  - PWA manifest
+  - PWA metadata
 - `sw.js`
-  - service worker for offline app-shell behavior
+  - service worker for offline app-shell support
 - `icons/`
-  - application icons
+  - app icons
 
 ## Running Locally
 
 You can open `index.html` directly for basic play.
 
-For PWA installation, offline caching, and service worker behavior, use a local web server:
+For proper PWA install/offline behavior, run a local server:
 
 ```bash
 python3 -m http.server 8000
@@ -250,24 +221,13 @@ Then open:
 http://localhost:8000
 ```
 
-## PWA Notes
-
-- Offline app-shell support requires `http://` or `https://`
-- `file://` does not support normal service worker or install behavior
-- The service worker is configured to update more aggressively so deployments refresh more reliably
-
 ## Save Data
 
-- Save data is stored in browser `localStorage`
-- Resetting from the UI clears the current run
-- Save key:
-  - `galacticTradingPostSave_v1`
-
-## Technical Notes
-
-- No framework
-- No backend
-- No build step
-- Single-page application
-- Plain JavaScript with timer-driven state updates
-- Designed to stay easy to expand
+- Saves are stored in `localStorage`
+- The game advances while you are away:
+  - missions continue
+  - scouting continues
+  - refits continue
+  - contract timers continue
+  - markets continue evolving
+- On return, an `Away Summary` reports key progress made offline
