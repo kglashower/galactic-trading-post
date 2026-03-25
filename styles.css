@@ -256,9 +256,17 @@ h3 {
   background: linear-gradient(90deg, var(--accent), var(--accent-2));
 }
 
-.progress-fill.warn {
-  background: linear-gradient(90deg, #ffca72, #ff9e62);
-}
+.progress-line.progress-progression { background: rgba(93, 219, 255, 0.14); }
+.progress-line.progress-scout { background: rgba(96, 145, 255, 0.16); }
+.progress-line.progress-timer { background: rgba(255, 186, 89, 0.16); }
+.progress-line.progress-contract { background: rgba(255, 109, 118, 0.16); }
+.progress-line.progress-analytics { background: rgba(112, 210, 255, 0.12); }
+
+.progress-fill.progression { background: linear-gradient(90deg, #42dfff, #68ffb1); }
+.progress-fill.scout { background: linear-gradient(90deg, #5c8dff, #7bd5ff); }
+.progress-fill.timer { background: linear-gradient(90deg, #ffc96a, #ff9e62); }
+.progress-fill.contract { background: linear-gradient(90deg, #ff8f73, #ff5f79); }
+.progress-fill.analytics { background: linear-gradient(90deg, #63c6ff, #4fe4ff); }
 
 .hub-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -268,12 +276,20 @@ h3 {
   text-align: left;
   padding: 0.95rem;
   cursor: pointer;
+  display: grid;
+  gap: 0.45rem;
 }
 
 .location-card strong {
   display: block;
   font-size: 1rem;
   margin-bottom: 0.25rem;
+}
+
+.location-sprite {
+  width: 2.9rem;
+  height: 2.9rem;
+  color: var(--accent);
 }
 
 .location-card .pill-row {
@@ -526,6 +542,15 @@ h3 {
   gap: 0.8rem;
 }
 
+.trade-exchange-layout {
+  align-items: start;
+}
+
+.trade-exchange-market,
+.trade-exchange-routes {
+  min-height: 0;
+}
+
 .empty {
   border: 1px dashed rgba(122, 166, 244, 0.36);
   border-radius: 14px;
@@ -648,6 +673,19 @@ h3 {
 
   .color-swatch-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .trade-exchange-layout {
+    grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+  }
+
+  .trade-exchange-intro {
+    grid-column: 1 / -1;
+  }
+
+  .trade-exchange-routes {
+    max-height: calc(100vh - 12.5rem);
+    overflow: auto;
   }
 }
 
