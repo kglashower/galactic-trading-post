@@ -1032,6 +1032,62 @@ function createMarketEvent(state, sequence) {
   };
 }
 
+function spawnMarketEvent(state, ageSeconds = 0) {
+  const sequence = state.marketEventSequence || 0;
+  const event = createMarketEvent(state, sequence);
+  state.marketEventSequence = sequence + 1;
+  if (!event) {
+    return null;
+  }
+  event.remainingSeconds = Math.max(0, event.remainingSeconds - Math.max(0, ageSeconds));
+  return event.remainingSeconds > 0 ? event : null;
+}
+
+function normalizeMarketEvents(state) {
+  const events = Array.isArray(state.marketEvents)
+    ? state.marketEvents.filter((event) => event && event.remainingSeconds > 0)
+    : [];
+  const offset = BALANCE.MARKET_EVENT_OFFSET_SECONDS;
+  const duration = BALANCE.MARKET_EVENT_DURATION_SECONDS;
+  let changed = false;
+
+  state.nextMarketEventIn = Number.isFinite(state.nextMarketEventIn)
+    ? clamp(Math.floor(state.nextMarketEventIn), 1, offset)
+    : offset;
+
+  events.sort((a, b) => b.remainingSeconds - a.remainingSeconds);
+  if (events.length > 2) {
+    events.length = 2;
+    changed = true;
+  }
+
+  while (events.length < 2) {
+    const fallback = spawnMarketEvent(state);
+    if (!fallback) {
+      break;
+    }
+    events.push(fallback);
+    changed = true;
+  }
+
+  if (events.length === 2) {
+    events.sort((a, b) => b.remainingSeconds - a.remainingSeconds);
+    const expectedOlderRemaining = state.nextMarketEventIn;
+    const expectedYoungerRemaining = Math.min(duration, expectedOlderRemaining + offset);
+    if (
+      events[0].remainingSeconds !== expectedYoungerRemaining ||
+      events[1].remainingSeconds !== expectedOlderRemaining
+    ) {
+      events[0].remainingSeconds = expectedYoungerRemaining;
+      events[1].remainingSeconds = expectedOlderRemaining;
+      changed = true;
+    }
+  }
+
+  state.marketEvents = events;
+  return changed;
+}
+
 function advanceMarketEvents(state, seconds) {
   let changed = false;
   state.marketEvents.forEach((event) => {
@@ -1044,16 +1100,15 @@ function advanceMarketEvents(state, seconds) {
   }
   state.nextMarketEventIn -= seconds;
   while (state.nextMarketEventIn <= 0) {
-    const sequence = (state.marketEventSequence || 0);
-    const event = createMarketEvent(state, sequence);
-    state.marketEventSequence = sequence + 1;
+    const ageSeconds = Math.max(0, -state.nextMarketEventIn);
+    const event = spawnMarketEvent(state, ageSeconds);
     state.nextMarketEventIn += BALANCE.MARKET_EVENT_OFFSET_SECONDS;
     if (event) {
       state.marketEvents.push(event);
       changed = true;
     }
   }
-  return changed;
+  return normalizeMarketEvents(state) || changed;
 }
 
 function createStructuralEvent(state) {
@@ -1252,6 +1307,49 @@ function createTradeLoadPlan(state, ships, system, outboundCommodityId, returnCo
   };
 }
 
+function getTradePlanFinanceSummary(plan, availableCredits) {
+  const borrowedAmount = Math.max(0, (plan?.totalUpfrontCost || 0) - Math.max(0, availableCredits || 0));
+  const allocations = (plan?.plans || []).map(() => ({
+    borrowedAmount: 0,
+    financeInterest: 0,
+    financeRepayment: 0
+  }));
+  if (!plan || borrowedAmount <= 0 || allocations.length === 0) {
+    return {
+      borrowedAmount,
+      totalInterest: 0,
+      allocations
+    };
+  }
+
+  const totalUpfront = plan.totalUpfrontCost || 1;
+  let totalInterest = 0;
+  allocations.forEach((allocation, index) => {
+    const borrowed = Math.round((borrowedAmount * plan.plans[index].upfrontCost) / totalUpfront);
+    allocation.borrowedAmount = borrowed;
+    allocation.financeInterest = getMissionFinanceInterest(borrowed, plan.plans[index].durationSeconds);
+    allocation.financeRepayment = allocation.borrowedAmount + allocation.financeInterest;
+    totalInterest += allocation.financeInterest;
+  });
+
+  const assignedBorrowed = allocations.reduce((sum, allocation) => sum + allocation.borrowedAmount, 0);
+  const delta = borrowedAmount - assignedBorrowed;
+  if (delta !== 0) {
+    const last = allocations[allocations.length - 1];
+    totalInterest -= last.financeInterest;
+    last.borrowedAmount += delta;
+    last.financeInterest = getMissionFinanceInterest(last.borrowedAmount, plan.plans[plan.plans.length - 1].durationSeconds);
+    last.financeRepayment = last.borrowedAmount + last.financeInterest;
+    totalInterest += last.financeInterest;
+  }
+
+  return {
+    borrowedAmount,
+    totalInterest,
+    allocations
+  };
+}
+
 function launchTradeMissionBatch(state, args) {
   const {
     systemId,
@@ -1280,6 +1378,7 @@ function launchTradeMissionBatch(state, args) {
   const isPartial = mode === "partial";
   const useFinancing = mode === "finance";
   const plan = createTradeLoadPlan(state, ships, system, outboundCommodityId, returnCommodityId, envoy, state.credits, isPartial);
+  const financeSummary = getTradePlanFinanceSummary(plan, state.credits);
   if (plan.loadedUnits <= 0) {
     return { ok: false, message: "Not enough Credits to fund any cargo for this mission." };
   }
@@ -1288,7 +1387,7 @@ function launchTradeMissionBatch(state, args) {
   }
 
   const batchId = `batch-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-  const borrowedAmount = useFinancing ? Math.max(0, plan.totalUpfrontCost - state.credits) : 0;
+  const borrowedAmount = useFinancing ? financeSummary.borrowedAmount : 0;
   if (useFinancing) {
     state.credits += borrowedAmount;
   }
@@ -1333,24 +1432,13 @@ function launchTradeMissionBatch(state, args) {
   }
 
   if (borrowedAmount > 0 && created.length > 0) {
-    const totalUpfront = plan.totalUpfrontCost || 1;
     created.forEach((mission, index) => {
-      let allocation = Math.round((borrowedAmount * plan.plans[index].upfrontCost) / totalUpfront);
-      mission.borrowedAmount = allocation;
-      mission.financeInterest = getMissionFinanceInterest(allocation, mission.durationSeconds);
-      mission.financeRepayment = allocation + mission.financeInterest;
+      const allocation = financeSummary.allocations[index] || { borrowedAmount: 0, financeInterest: 0, financeRepayment: 0 };
+      mission.borrowedAmount = allocation.borrowedAmount;
+      mission.financeInterest = allocation.financeInterest;
+      mission.financeRepayment = allocation.financeRepayment;
       totalFinanceInterest += mission.financeInterest;
     });
-    const assigned = created.reduce((sum, mission) => sum + mission.borrowedAmount, 0);
-    const delta = borrowedAmount - assigned;
-    if (delta !== 0) {
-      const last = created[created.length - 1];
-      totalFinanceInterest -= last.financeInterest;
-      last.borrowedAmount += delta;
-      last.financeInterest = getMissionFinanceInterest(last.borrowedAmount, last.durationSeconds);
-      last.financeRepayment = last.borrowedAmount + last.financeInterest;
-      totalFinanceInterest += last.financeInterest;
-    }
   }
 
   state.tradeMissions.push(...created);
@@ -1835,6 +1923,7 @@ function normalizeLoadedState(raw) {
   }
   state.marketEventSequence = Number.isFinite(raw.marketEventSequence) ? raw.marketEventSequence : state.marketEvents.length;
   state.nextMarketEventIn = Number.isFinite(raw.nextMarketEventIn) ? Math.max(1, raw.nextMarketEventIn) : BALANCE.MARKET_EVENT_OFFSET_SECONDS;
+  normalizeMarketEvents(state);
   state.nextStructuralEventIn = Number.isFinite(raw.nextStructuralEventIn)
     ? Math.max(1, raw.nextStructuralEventIn)
     : getStructuralEventIntervalSeconds(raw.structuralEventSequence || 0);
@@ -2799,8 +2888,9 @@ function renderTradePlanner() {
   const envoy = tradePlannerState.selectedEnvoyId ? findTradeEnvoy(gameState, tradePlannerState.selectedEnvoyId) : null;
   const fullPlan = system ? createTradeLoadPlan(gameState, selectedShips, system, tradePlannerState.outboundCommodityId, tradePlannerState.returnCommodityId, envoy, gameState.credits, false) : null;
   const partialPlan = system ? createTradeLoadPlan(gameState, selectedShips, system, tradePlannerState.outboundCommodityId, tradePlannerState.returnCommodityId, envoy, gameState.credits, true) : null;
-  const borrowedAmount = fullPlan ? Math.max(0, fullPlan.totalUpfrontCost - gameState.credits) : 0;
-  const estimatedInterest = fullPlan ? fullPlan.plans.reduce((sum, plan) => sum + getMissionFinanceInterest(Math.round((borrowedAmount * plan.upfrontCost) / Math.max(1, fullPlan.totalUpfrontCost)), plan.durationSeconds), 0) : 0;
+  const financeSummary = fullPlan ? getTradePlanFinanceSummary(fullPlan, gameState.credits) : { borrowedAmount: 0, totalInterest: 0 };
+  const borrowedAmount = financeSummary.borrowedAmount;
+  const estimatedInterest = financeSummary.totalInterest;
   const loadPct = fullPlan ? getPercent(fullPlan.loadedUnits, fullPlan.totalCapacity || 1) : 0;
   const partialPct = partialPlan ? getPercent(partialPlan.loadedUnits, partialPlan.totalCapacity || 1) : 0;
   const fundingPct = fullPlan ? getPercent(Math.min(gameState.credits, fullPlan.totalUpfrontCost), fullPlan.totalUpfrontCost || 1) : 0;
@@ -2855,6 +2945,7 @@ function renderTradePlanner() {
             <p class="metric-line">Estimated return cost: ${formatCredits(fullPlan?.totalEstimatedReturnCost || 0)}</p>
             <p class="metric-line">Finance shortfall: ${borrowedAmount > 0 ? formatCredits(borrowedAmount) : "None"}</p>
             <p class="metric-line">Estimated interest: ${borrowedAmount > 0 ? formatCredits(estimatedInterest) : "0 cr"}</p>
+            ${envoy ? `<p class="metric-line">Envoy pricing: <strong>${escapeHtml(envoy.name)}</strong> • ${escapeHtml(getEnvoySpecialtyLabel(envoy))} • ${(getTradeEnvoyBonusRate(envoy) * 100).toFixed(1)}% better pricing on matching cargo</p>` : ""}
             <p class="metric-line">Projected result ${borrowedAmount > 0 ? "(after interest)" : ""}: <span class="${(fullPlan?.totalEstimatedProfit || 0) - estimatedInterest >= 0 ? "pos" : "neg"}">${((fullPlan?.totalEstimatedProfit || 0) - estimatedInterest) >= 0 ? "+" : ""}${formatCredits((fullPlan?.totalEstimatedProfit || 0) - estimatedInterest)}</span></p>
             ${partialPlan && partialPlan.loadedUnits > 0 ? `<p class="metric-line">Partial-load coverage: ${partialPlan.loadedUnits} / ${partialPlan.totalCapacity}</p><div class="progress-line progress-timer"><div class="progress-fill timer" style="width:${partialPct}%"></div></div>` : ""}
           </article>
@@ -2944,7 +3035,7 @@ function resetGame() {
 
 document.body.addEventListener("click", (event) => {
   const rawTarget = event.target;
-  if (!(rawTarget instanceof HTMLElement)) {
+  if (!(rawTarget instanceof Element)) {
     return;
   }
 

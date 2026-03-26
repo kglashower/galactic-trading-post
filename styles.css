@@ -290,6 +290,7 @@ h3 {
   width: 2.9rem;
   height: 2.9rem;
   color: var(--accent);
+  pointer-events: none;
 }
 
 .location-card .pill-row {
