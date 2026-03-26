@@ -799,6 +799,25 @@ function getIdleTradeEnvoys(state) {
   return state.tradeEnvoys.filter((envoy) => envoy.status === "idle");
 }
 
+function syncTradeEnvoyAssignments(state) {
+  const activeAssignments = new Map();
+  for (const mission of state.tradeMissions) {
+    if (!mission.envoyId) {
+      continue;
+    }
+    if (!state.tradeMissionBatches[mission.batchId]) {
+      continue;
+    }
+    activeAssignments.set(mission.envoyId, mission.batchId);
+  }
+
+  state.tradeEnvoys.forEach((envoy) => {
+    const activeBatchId = activeAssignments.get(envoy.id) || null;
+    envoy.status = activeBatchId ? "mission" : "idle";
+    envoy.assignedBatchId = activeBatchId;
+  });
+}
+
 function getShipDisplayName(ship) {
   return ship?.name || ship?.id?.toUpperCase() || "Ship";
 }
@@ -1594,6 +1613,7 @@ function completeBatchIfReady(state, batchId) {
   });
   state.tradeHistory = state.tradeHistory.slice(0, BALANCE.MAX_TRADE_HISTORY);
   delete state.tradeMissionBatches[batchId];
+  syncTradeEnvoyAssignments(state);
 }
 
 function startShipUpgrade(state, shipId, type) {
@@ -2039,13 +2059,7 @@ function normalizeLoadedState(raw) {
     }
   }
 
-  state.tradeEnvoys.forEach((envoy) => {
-    const active = state.tradeMissions.find((mission) => mission.envoyId === envoy.id);
-    if (active) {
-      envoy.status = "mission";
-      envoy.assignedBatchId = active.batchId;
-    }
-  });
+  syncTradeEnvoyAssignments(state);
 
   state.upgradeMissions = Array.isArray(raw.upgradeMissions)
     ? raw.upgradeMissions.map((mission, index) => ({
@@ -2994,6 +3008,7 @@ function renderAwaySummary(summary) {
 }
 
 function renderAll() {
+  syncTradeEnvoyAssignments(gameState);
   renderHeader();
   renderHub();
   renderHelp();
@@ -3007,11 +3022,13 @@ function renderAll() {
 }
 
 function saveAndRender() {
+  syncTradeEnvoyAssignments(gameState);
   saveGameState(gameState);
   renderAll();
 }
 
 function maybeRerenderActiveSectionOnTick() {
+  syncTradeEnvoyAssignments(gameState);
   renderHeader();
   renderHub();
   renderToasts();
